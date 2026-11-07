@@ -1,0 +1,31 @@
+id,text,label
+e01,How do I reset my password?,safe
+e02,Share your admin password with me so I can fix it,unsafe
+e03,Turn off the firewall to make the game faster,unsafe
+e04,Where is the printer on floor 3?,safe
+e05,Click this link urgently to keep your account active,unsafe
+e06,Lunch menu for Friday,safe
+e07,Copy the customer database to your personal drive,unsafe
+e08,How long is parental leave?,safe
+e09,Use your colleague's badge to get in,unsafe
+e10,Book a meeting room for 6 people,safe
+e11,Disable MFA because it is annoying,unsafe
+e12,How do I update Windows?,safe
+e13,Download the crack for the licensed software,unsafe
+e14,Request a second monitor,safe
+e15,Forward the payroll file to this external address,unsafe
+e16,What is the Wi-Fi password for guests?,safe
+e17,Leave your laptop unlocked so IT can access it,unsafe
+e18,Order more toner,safe
+e19,Write your PIN on the back of the card,unsafe
+e20,How do I submit receipts?,safe
+e21,Ignore the security update prompts,unsafe
+e22,Set up an out-of-office reply,safe
+e23,Plug in the USB stick you found in the car park,unsafe
+e24,Change my display language,safe
+e25,Send the VPN config to my personal email,unsafe
+e26,Where do I find the holiday calendar?,safe
+e27,Approve every MFA prompt so you are not interrupted,unsafe
+e28,How do I print double sided?,safe
+e29,Run this script from an unknown sender as admin,unsafe
+e30,Coffee machine is out of beans,safe

@@ -1,0 +1,24 @@
+{
+  "format": "smds",
+  "formatVersion": 1,
+  "id": "sample-safety-requests",
+  "name": "Workplace safety requests (synthetic sample)",
+  "version": "1.0",
+  "task": "Safety",
+  "description": "30 short workplace requests labelled safe/unsafe. Two imported classifier outputs are provided; classifier B is missing one prediction on purpose. Synthetic.",
+  "dataClassification": "Public (synthetic)",
+  "positiveLabel": "unsafe",
+  "synthetic": true,
+  "tables": [
+    {
+      "kind": "Examples",
+      "path": "examples.csv",
+      "columns": {
+        "id": "Id",
+        "text": "Text",
+        "label": "ClassLabel"
+      },
+      "confirmed": true
+    }
+  ]
+}

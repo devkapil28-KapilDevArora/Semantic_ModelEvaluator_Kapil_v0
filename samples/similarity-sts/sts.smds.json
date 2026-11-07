@@ -1,0 +1,24 @@
+{
+  "format": "smds",
+  "formatVersion": 1,
+  "id": "sample-sts",
+  "name": "Sentence similarity (synthetic sample)",
+  "version": "1.0",
+  "task": "SemanticSimilarity",
+  "description": "20 sentence pairs with hand-assigned 0-5 similarity. Synthetic.",
+  "dataClassification": "Public (synthetic)",
+  "synthetic": true,
+  "tables": [
+    {
+      "kind": "Examples",
+      "path": "pairs.csv",
+      "columns": {
+        "id": "Id",
+        "sentence1": "Text",
+        "sentence2": "Text2",
+        "similarity": "SimilarityScore"
+      },
+      "confirmed": true
+    }
+  ]
+}

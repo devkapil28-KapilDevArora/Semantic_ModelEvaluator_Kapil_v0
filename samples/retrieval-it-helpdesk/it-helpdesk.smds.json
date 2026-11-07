@@ -1,0 +1,43 @@
+{
+  "format": "smds",
+  "formatVersion": 1,
+  "id": "sample-it-helpdesk",
+  "name": "IT helpdesk KB (synthetic sample)",
+  "version": "1.0",
+  "task": "Retrieval",
+  "description": "40 hand-written helpdesk articles, 12 queries (one deliberately unanswerable: q12), graded relevance 0-3 and per-pair harm labels. Synthetic; for demonstrating the workflow only.",
+  "dataClassification": "Public (synthetic)",
+  "synthetic": true,
+  "tables": [
+    {
+      "kind": "Documents",
+      "path": "documents.csv",
+      "columns": {
+        "id": "Id",
+        "title": "Metadata",
+        "text": "Text"
+      },
+      "confirmed": true
+    },
+    {
+      "kind": "Queries",
+      "path": "queries.csv",
+      "columns": {
+        "id": "Id",
+        "text": "Text"
+      },
+      "confirmed": true
+    },
+    {
+      "kind": "Judgments",
+      "path": "judgments.jsonl",
+      "columns": {
+        "query_id": "QueryId",
+        "doc_id": "DocumentId",
+        "grade": "RelevanceGrade",
+        "harmful": "SafetyLabel"
+      },
+      "confirmed": true
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>SemanticModelEvaluator.App</RootNamespace>
+    <AssemblyName>Semantic_ModelEvaluator_Kapil_V0</AssemblyName>
+    <AssemblyTitle>Semantic_ModelEvaluator_Kapil_V0</AssemblyTitle>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SemanticModelEvaluator.Core\SemanticModelEvaluator.Core.csproj" />
+    <ProjectReference Include="..\SemanticModelEvaluator.Providers\SemanticModelEvaluator.Providers.csproj" />
+    <InternalsVisibleTo Include="SemanticModelEvaluator.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\..\samples\**\*" LinkBase="samples" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

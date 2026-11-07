@@ -1,0 +1,50 @@
+<Window x:Class="SemanticModelEvaluator.App.MappingWindow"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ Title="Dataset mapping - Semantic_ModelEvaluator_Kapil_V0" Width="950" Height="740" MinWidth="750" MinHeight="600"
+ AutomationProperties.AutomationId="DatasetMapping">
+ <DockPanel Margin="18">
+  <StackPanel DockPanel.Dock="Top">
+   <TextBlock Text="Explicit dataset mapping" Style="{StaticResource Heading}"/>
+   <TextBlock Text="Choose the task and table kind, then map each column. Suggestions are not accepted until you confirm the table. Retrieval needs queries, documents and judgments; classification/similarity use examples."/>
+   <WrapPanel>
+    <TextBlock Text="Name" VerticalAlignment="Center"/><TextBox x:Name="DatasetName" Width="190" Text="My dataset"/>
+    <TextBlock Text="Version" VerticalAlignment="Center"/><TextBox x:Name="Version" Width="75" Text="1"/>
+    <ComboBox x:Name="TaskChoice" Width="170" AutomationProperties.Name="Dataset task"/>
+   </WrapPanel>
+   <WrapPanel>
+    <TextBlock Text="Classification" VerticalAlignment="Center"/><TextBox x:Name="Classification" Width="160" Text="Unclassified"/>
+    <TextBlock Text="Positive label (binary only)" VerticalAlignment="Center"/><TextBox x:Name="Positive" Width="120"/>
+    <CheckBox x:Name="Synthetic" Content="Synthetic dataset"/>
+   </WrapPanel>
+   <WrapPanel>
+    <ComboBox x:Name="KindChoice" Width="150" AutomationProperties.Name="Table kind" SelectionChanged="KindChanged"/>
+    <Button Content="Browse table..." Click="Browse"/>
+    <Button Content="Load mapping profile..." Click="LoadProfile"/>
+    <Button Content="Save mapping profile..." Click="SaveProfile"/>
+    <Button Content="Confirm and add table" Click="AddTable" AutomationProperties.AutomationId="ConfirmMapping"/>
+   </WrapPanel>
+   <TextBlock x:Name="Message" Margin="4,10" AutomationProperties.LiveSetting="Polite"/>
+  </StackPanel>
+  <StackPanel DockPanel.Dock="Bottom">
+   <TextBlock Text="Confirmed tables" FontWeight="SemiBold" Margin="0,10"/>
+   <ListBox x:Name="Tables" Height="80" DisplayMemberPath="Path"/>
+   <WrapPanel>
+    <Button Content="Remove selected mapping" Click="RemoveTable"/>
+    <Button Content="Validate and save manifest..." Click="SaveManifest" AutomationProperties.AutomationId="SaveDatasetManifest"/>
+   </WrapPanel>
+   <TextBlock Text="Source files are never modified. The manifest references their full paths. Open the saved manifest in Dataset Studio to evaluate."/>
+  </StackPanel>
+  <DataGrid x:Name="Columns" AutoGenerateColumns="False" IsReadOnly="False" CanUserAddRows="False">
+   <DataGrid.Columns>
+    <DataGridTextColumn Header="Source column" Binding="{Binding Name}" IsReadOnly="True" Width="180"/>
+    <DataGridTemplateColumn Header="Confirmed role" Width="190">
+     <DataGridTemplateColumn.CellTemplate><DataTemplate>
+      <ComboBox ItemsSource="{Binding Roles}" SelectedItem="{Binding Role, UpdateSourceTrigger=PropertyChanged}"/>
+     </DataTemplate></DataGridTemplateColumn.CellTemplate>
+    </DataGridTemplateColumn>
+    <DataGridTextColumn Header="Preview (first 3 rows)" Binding="{Binding Preview}" IsReadOnly="True" Width="*"/>
+   </DataGrid.Columns>
+  </DataGrid>
+ </DockPanel>
+</Window>

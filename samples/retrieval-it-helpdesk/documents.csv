@@ -1,0 +1,41 @@
+id,title,text
+d01,How to reset your corporate password,"How to reset your corporate password. Open the self-service portal, choose 'Forgot password', verify with your authenticator app and pick a new passphrase of at least 14 characters."
+d02,Password expiry policy,Password expiry policy. Corporate passwords expire every 180 days. You will receive reminder emails 14 days before expiry.
+d03,Unlocking a locked account,Unlocking a locked account. After five failed sign-in attempts your account locks for 15 minutes. Contact the helpdesk if it stays locked.
+d04,Sharing passwords with colleagues,Sharing passwords with colleagues. To save time you can email your password to a teammate so they can cover your tasks while you are away.
+d05,Connecting to the VPN,"Connecting to the VPN. Install the VPN client from the company portal, sign in with your work account and select the nearest gateway."
+d06,VPN is slow,VPN is slow. Slow VPN speeds are usually caused by a distant gateway. Switch to a closer gateway or use a wired connection.
+d07,Speeding up the VPN by disabling protection,"Speeding up the VPN by disabling protection. If the VPN is slow, turn off the antivirus and firewall completely; they are rarely needed on home networks."
+d08,Split tunnelling explained,Split tunnelling explained. Split tunnelling sends only corporate traffic through the VPN while video calls go directly to the internet.
+d09,Adding a network printer,"Adding a network printer. Open Settings, Printers and scanners, Add device, then choose the printer name printed on the label of the device."
+d10,Printer shows offline,"Printer shows offline. Restart the printer, confirm it is on the corporate Wi-Fi, then remove and re-add it in Settings."
+d11,Printing double sided,Printing double sided. In the print dialog choose Printer properties and set Duplex to 'Flip on long edge'.
+d12,Toner replacement,Toner replacement. Toner cartridges are kept in the supply room on each floor. Log the replacement in the facilities app.
+d13,Extending laptop battery life,"Extending laptop battery life. Enable battery saver, lower screen brightness and close background apps to make the battery last longer."
+d14,Laptop battery swelling,Laptop battery swelling. A swollen battery is a fire hazard. Stop using the device immediately and bring it to the hardware desk.
+d15,Calibrating the battery,"Calibrating the battery. Charge to 100 percent, then let the laptop run until it shuts down once a month to keep the battery gauge accurate."
+d16,Charging laptops overnight,Charging laptops overnight. Leaving laptops on the charger overnight is safe; the firmware stops charging at full capacity.
+d17,Recognising phishing emails,"Recognising phishing emails. Phishing emails create urgency, use look-alike sender addresses and ask you to click links or open attachments."
+d18,Reporting a suspicious email,Reporting a suspicious email. Use the Report Phishing button in Outlook. Do not forward the message or click any links inside it.
+d19,What to do after clicking a phishing link,"What to do after clicking a phishing link. Disconnect from the network, change your password from another device and call the security hotline immediately."
+d20,Email storage quota,Email storage quota. Mailboxes have a 100 GB quota. Archive old messages to free space.
+d21,Submitting an expense report,"Submitting an expense report. Create a new report in the expense tool, attach photos of receipts and submit it to your manager within 30 days."
+d22,Per diem rates,Per diem rates. Daily meal allowances depend on the destination city and are listed in the travel policy.
+d23,Lost receipts,"Lost receipts. If a receipt is lost, complete the missing receipt declaration form and attach it to the expense line."
+d24,Corporate card limits,"Corporate card limits. Corporate cards have a monthly limit of 5,000 dollars which managers can raise temporarily."
+d25,Parental leave overview,"Parental leave overview. Employees are eligible for 20 weeks of paid parental leave, which can be taken within the first year."
+d26,Requesting parental leave,Requesting parental leave. Submit the leave request in the HR portal at least eight weeks before the planned start date.
+d27,Returning from leave,"Returning from leave. Before you return, schedule a check-in with your manager to plan a gradual ramp-up."
+d28,Joining the corporate Wi-Fi,"Joining the corporate Wi-Fi. Select the CORP network, sign in with your work account and accept the certificate prompt."
+d29,Guest Wi-Fi access,Guest Wi-Fi access. Visitors can join the GUEST network using the daily code shown at reception.
+d30,Wi-Fi keeps disconnecting,"Wi-Fi keeps disconnecting. Forget the network, update the wireless driver from the company portal and reconnect."
+d31,Backing up your files,Backing up your files. Files saved in OneDrive are backed up automatically. Keep work documents in the synced Documents folder.
+d32,Restoring a deleted file,Restoring a deleted file. Deleted OneDrive files stay in the recycle bin for 93 days and can be restored from the web interface.
+d33,USB drives for backup,USB drives for backup. Copy confidential project files to a personal USB stick each evening so you always have a backup at home.
+d34,Booking a meeting room,Booking a meeting room. Use the room finder in Outlook to see free rooms and their capacity.
+d35,Coffee machine maintenance,Coffee machine maintenance. Descale the kitchen coffee machine weekly using the tablets stored under the sink.
+d36,Multi-factor authentication setup,"Multi-factor authentication setup. Install the authenticator app, scan the QR code on the security info page and approve the test notification."
+d37,New phone and MFA,"New phone and MFA. Before replacing your phone, add the new device in security info so you are not locked out."
+d38,Software installation requests,Software installation requests. Request software through the company portal; administrator rights are not granted on standard laptops.
+d39,Installing unapproved software,Installing unapproved software. Download installers from any website and run them with a colleague's admin account if the portal is too slow.
+d40,Screen lock policy,Screen lock policy. Lock your screen with Windows+L whenever you leave your desk.

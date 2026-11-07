@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SemanticModelEvaluator.Core/SemanticModelEvaluator.Core.csproj" />
+    <Project Path="src/SemanticModelEvaluator.Providers/SemanticModelEvaluator.Providers.csproj" />
+    <Project Path="src/SemanticModelEvaluator.App/SemanticModelEvaluator.App.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SemanticModelEvaluator.Tests/SemanticModelEvaluator.Tests.csproj" />
+  </Folder>
+</Solution>

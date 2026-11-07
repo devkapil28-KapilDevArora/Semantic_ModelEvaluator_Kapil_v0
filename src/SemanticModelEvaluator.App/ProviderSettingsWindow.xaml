@@ -1,0 +1,72 @@
+<Window x:Class="SemanticModelEvaluator.App.ProviderSettingsWindow"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ Title="Provider settings - Semantic_ModelEvaluator_Kapil_V0" Width="820" Height="820"
+ AutomationProperties.AutomationId="ProviderSettings">
+ <ScrollViewer VerticalScrollBarVisibility="Auto">
+ <StackPanel Margin="22">
+  <TextBlock Text="Provider settings" Style="{StaticResource Heading}"/>
+  <GroupBox Header="Hugging Face credentials">
+   <StackPanel>
+    <TextBlock Text="Accept gated-model terms on Hugging Face before downloading. Tokens are stored in Windows Credential Manager, not settings, workbooks or logs."/>
+    <PasswordBox x:Name="Token" Padding="8" Margin="4,12" AutomationProperties.Name="Hugging Face token"/>
+    <WrapPanel><Button Content="Store token" Click="StoreToken"/><Button Content="Delete stored token..." Click="DeleteToken"/></WrapPanel>
+   </StackPanel>
+  </GroupBox>
+  <GroupBox Header="Optional FuzzyFindAnything / MicrosoftProvider worker">
+   <StackPanel>
+    <TextBlock Text="Prepare and authenticate the provider in FuzzyFindAnything first. Binding a worker grants permission to run that executable locally. No executable is downloaded here."/>
+    <TextBox x:Name="BindingName" Text="Prepared provider model" AutomationProperties.Name="Worker model name"/>
+    <DockPanel><Button DockPanel.Dock="Right" Content="Browse executable..." Click="BrowseWorker"/><TextBox x:Name="Worker" AutomationProperties.Name="Worker executable path"/></DockPanel>
+    <DockPanel><Button DockPanel.Dock="Right" Content="Browse model folder..." Click="BrowseModel"/><TextBox x:Name="ModelFolder" AutomationProperties.Name="Prepared model folder"/></DockPanel>
+    <TextBlock Text="Optional --provider argument (leave blank unless required by the worker)"/>
+    <TextBox x:Name="ProviderArgument" AutomationProperties.Name="Worker provider argument"/>
+    <Button Content="Trust and register binding..." Click="RegisterWorker" HorizontalAlignment="Left"/>
+   </StackPanel>
+  </GroupBox>
+  <GroupBox Header="Microsoft AI Foundry / Azure OpenAI embedding deployments">
+   <StackPanel>
+    <TextBlock TextWrapping="Wrap" Text="Entra ID (DefaultAzureCredential: Azure CLI, Visual Studio, managed identity) is preferred. API keys are stored only in Windows Credential Manager under foundry:&lt;name&gt; and are never written to settings, logs or reports."/>
+    <ListBox x:Name="Deployments" Height="90" Margin="4,8" SelectionChanged="DeploymentSelected" AutomationProperties.Name="Configured Foundry deployments"/>
+    <Grid>
+     <Grid.ColumnDefinitions><ColumnDefinition Width="170"/><ColumnDefinition/></Grid.ColumnDefinitions>
+     <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+     <TextBlock Text="Display name" VerticalAlignment="Center"/><TextBox x:Name="FName" Grid.Column="1" AutomationProperties.Name="Foundry display name"/>
+     <TextBlock Grid.Row="1" Text="Endpoint (https://...)" VerticalAlignment="Center"/><TextBox x:Name="FEndpoint" Grid.Row="1" Grid.Column="1" AutomationProperties.Name="Foundry endpoint"/>
+     <TextBlock Grid.Row="2" Text="Deployment" VerticalAlignment="Center"/><TextBox x:Name="FDeployment" Grid.Row="2" Grid.Column="1" AutomationProperties.Name="Foundry deployment"/>
+     <TextBlock Grid.Row="3" Text="API style" VerticalAlignment="Center"/><ComboBox x:Name="FApiStyle" Grid.Row="3" Grid.Column="1" SelectedIndex="0" AutomationProperties.Name="Foundry API style"><ComboBoxItem Content="OpenAIv1"/><ComboBoxItem Content="AzureOpenAIDeployment"/></ComboBox>
+     <TextBlock Grid.Row="4" Text="API version (deployment style)" VerticalAlignment="Center"/><TextBox x:Name="FApiVersion" Grid.Row="4" Grid.Column="1" Text="2024-10-21" AutomationProperties.Name="Foundry API version"/>
+     <TextBlock Grid.Row="5" Text="Model name / version" VerticalAlignment="Center"/><TextBox x:Name="FModelVersion" Grid.Row="5" Grid.Column="1" AutomationProperties.Name="Foundry model version"/>
+     <TextBlock Grid.Row="6" Text="Dimensions (optional)" VerticalAlignment="Center"/><TextBox x:Name="FDimensions" Grid.Row="6" Grid.Column="1" AutomationProperties.Name="Foundry dimensions"/>
+     <TextBlock Grid.Row="7" Text="Authentication" VerticalAlignment="Center"/><ComboBox x:Name="FAuth" Grid.Row="7" Grid.Column="1" SelectedIndex="0" AutomationProperties.Name="Foundry authentication"><ComboBoxItem Content="EntraId"/><ComboBoxItem Content="ApiKey"/></ComboBox>
+     <TextBlock Grid.Row="8" Text="Tenant id (optional)" VerticalAlignment="Center"/><TextBox x:Name="FTenant" Grid.Row="8" Grid.Column="1" AutomationProperties.Name="Foundry tenant"/>
+     <TextBlock Grid.Row="9" Text="Price / 1K input tokens (optional)" VerticalAlignment="Center"/><TextBox x:Name="FPrice" Grid.Row="9" Grid.Column="1" AutomationProperties.Name="Foundry price per 1K tokens"/>
+    </Grid>
+    <TextBlock Text="API key (only for ApiKey authentication; leave empty to keep the stored key)" Margin="0,6,0,0"/>
+    <PasswordBox x:Name="FKey" Padding="6" AutomationProperties.Name="Foundry API key"/>
+    <WrapPanel><Button Content="Save deployment" Click="SaveDeployment"/><Button Content="Remove selected..." Click="RemoveDeployment"/></WrapPanel>
+   </StackPanel>
+  </GroupBox>
+  <GroupBox Header="EvalKit results and datasets">
+   <StackPanel>
+    <TextBlock TextWrapping="Wrap" Text="Cloud access uses your own Azure CLI sign-in (az login). Sensitive containers are only read when you explicitly choose them; there is no fallback identity."/>
+    <Grid>
+     <Grid.ColumnDefinitions><ColumnDefinition Width="210"/><ColumnDefinition/></Grid.ColumnDefinitions>
+     <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+     <TextBlock Text="Results storage account" VerticalAlignment="Center"/><TextBox x:Name="EAccount" Grid.Column="1" AutomationProperties.Name="EvalKit results account"/>
+     <TextBlock Grid.Row="1" Text="Non-sensitive container" VerticalAlignment="Center"/><TextBox x:Name="ENonSensitive" Grid.Row="1" Grid.Column="1" AutomationProperties.Name="Non-sensitive container"/>
+     <TextBlock Grid.Row="2" Text="Sensitive container" VerticalAlignment="Center"/><TextBox x:Name="ESensitive" Grid.Row="2" Grid.Column="1" AutomationProperties.Name="Sensitive container"/>
+     <TextBlock Grid.Row="3" Text="Dataset storage account" VerticalAlignment="Center"/><TextBox x:Name="EDatasetAccount" Grid.Row="3" Grid.Column="1" AutomationProperties.Name="EvalKit dataset account"/>
+     <TextBlock Grid.Row="4" Text="Tenant id (optional)" VerticalAlignment="Center"/><TextBox x:Name="ETenant" Grid.Row="4" Grid.Column="1" AutomationProperties.Name="EvalKit tenant"/>
+     <TextBlock Grid.Row="5" Text="EvalKit CLI (dll/exe, optional)" VerticalAlignment="Center"/><TextBox x:Name="ECli" Grid.Row="5" Grid.Column="1" AutomationProperties.Name="EvalKit CLI path"/>
+     <TextBlock Grid.Row="6" Text="ASG-SearchPlatform root (optional)" VerticalAlignment="Center"/><TextBox x:Name="ERepo" Grid.Row="6" Grid.Column="1" AutomationProperties.Name="Repository root"/>
+     <TextBlock Grid.Row="7" Text="Result cache folder (optional)" VerticalAlignment="Center"/><TextBox x:Name="EResultCache" Grid.Row="7" Grid.Column="1" AutomationProperties.Name="Result cache folder"/>
+     <TextBlock Grid.Row="8" Text="Dataset cache folder (optional)" VerticalAlignment="Center"/><TextBox x:Name="EDatasetCache" Grid.Row="8" Grid.Column="1" AutomationProperties.Name="Dataset cache folder"/>
+    </Grid>
+    <Button Content="Save EvalKit settings" Click="SaveEvalKit" HorizontalAlignment="Left"/>
+   </StackPanel>
+  </GroupBox>
+  <TextBlock x:Name="Status" Margin="4,12" AutomationProperties.LiveSetting="Polite"/>
+ </StackPanel>
+ </ScrollViewer>
+</Window>
