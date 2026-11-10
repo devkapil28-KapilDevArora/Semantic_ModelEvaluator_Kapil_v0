@@ -11,6 +11,8 @@ using SemanticModelEvaluator.Core.Persistence;
 using SemanticModelEvaluator.Core.Providers;
 using SemanticModelEvaluator.Core.Security;
 using SemanticModelEvaluator.Providers;
+using SemanticModelEvaluator.Providers.Datasets;
+using SemanticModelEvaluator.Providers.EvalKit;
 using SemanticModelEvaluator.Providers.Onnx;
 using Xunit;
 
@@ -101,6 +103,84 @@ public class WorkbenchTests
         Assert.DoesNotContain(hub.Ancestors(), e => (string?)e.Attribute("AutomationProperties.AutomationId") == "PairResults");
         var browse = document.Descendants().Single(e => (string?)e.Attribute("AutomationProperties.AutomationId") == "PairBrowseDatasets");
         Assert.DoesNotContain(browse.Ancestors(), e => (string?)e.Attribute("AutomationProperties.AutomationId") == "PairResults");
+        var picker = document.Descendants().Single(e => (string?)e.Attribute("AutomationProperties.AutomationId") == "PairDatasetPicker");
+        Assert.Equal("{Binding ReadyDatasets}", (string?)picker.Attribute("ItemsSource"));
+        Assert.DoesNotContain(picker.Ancestors(), e => (string?)e.Attribute("AutomationProperties.AutomationId") == "PairResults");
+    }
+
+    [Fact]
+    public async Task Step3_loads_its_selected_dataset_without_captured_runs_and_can_evaluate()
+    {
+        using var root = new TempAppRoot();
+        using var fixture = new DatasetPickerFixture();
+        await fixture.Hub.RefreshCommand.ExecuteAsync(null);
+        fixture.Hub.SelectedReady = fixture.Hub.ReadyDatasets.Single(c => c.Manifest == Fixtures.HelpdeskManifest);
+        fixture.Hub.Selected = fixture.Hub.Cards.First(c => c.Manifest != Fixtures.HelpdeskManifest);
+        fixture.Workbench.TabIndex = 7;
+        Assert.False(fixture.Pair.HasCapturedDataset);
+        await fixture.Hub.LoadSelectedPairCommand.ExecuteAsync(null);
+        Assert.True(fixture.Pair.HasDataset, fixture.Hub.Status);
+        Assert.Equal(0, fixture.Workbench.TabIndex);
+        Assert.Contains(Fixtures.HelpdeskManifest, fixture.Settings.Current.RecentDatasets);
+        Assert.Contains("Loaded", fixture.Hub.Status);
+        fixture.Pair.A.SelectProviderModel(DeterministicProvider.ProviderId, DeterministicProvider.Describe("hash-word-256"));
+        fixture.Pair.B.SelectProviderModel(DeterministicProvider.ProviderId, DeterministicProvider.Describe("hash-char3-256"));
+        await fixture.Pair.RunCommand.ExecuteAsync(null);
+        Assert.NotNull(fixture.Pair.Result);
+        Assert.DoesNotContain("Error:", fixture.Pair.Status);
+    }
+
+    [Fact]
+    public async Task Picker_refresh_preserves_selection_and_failed_load_keeps_valid_dataset()
+    {
+        using var root = new TempAppRoot();
+        using var fixture = new DatasetPickerFixture();
+        await fixture.Hub.RefreshCommand.ExecuteAsync(null);
+        fixture.Hub.SelectedReady = fixture.Hub.ReadyDatasets.Single(c => c.Manifest == Fixtures.HelpdeskManifest);
+        await fixture.Hub.LoadSelectedPairCommand.ExecuteAsync(null);
+        var before = fixture.Pair.DatasetInfo;
+        fixture.Hub.Filter = "no hub cards match this filter";
+        await fixture.Hub.RefreshCommand.ExecuteAsync(null);
+        Assert.Equal(Fixtures.HelpdeskManifest, fixture.Hub.SelectedReady!.Manifest);
+        Assert.Empty(fixture.Hub.VisibleCards);
+        fixture.Workbench.TabIndex = 7;
+        fixture.Hub.SelectedReady = fixture.Hub.SelectedReady with { Manifest = Path.Combine(root.Root, "missing.smds.json") };
+        await fixture.Hub.LoadSelectedPairCommand.ExecuteAsync(null);
+        Assert.StartsWith("Dataset operation failed:", fixture.Hub.Status);
+        Assert.Equal(before, fixture.Pair.DatasetInfo);
+        Assert.Equal(7, fixture.Workbench.TabIndex);
+        fixture.Hub.SelectedReady = fixture.Hub.SelectedReady with { Manifest = null };
+        await fixture.Hub.LoadSelectedPairCommand.ExecuteAsync(null);
+        Assert.Contains("Select a prepared dataset", fixture.Hub.Status);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.Pair.LoadDatasetAsync(Fixtures.StsManifest, cancellationToken: cancelled.Token));
+        Assert.Equal(before, fixture.Pair.DatasetInfo);
+    }
+
+    private sealed class DatasetPickerFixture : IDisposable
+    {
+        private readonly HttpClient http = new();
+        public SettingsStore Settings { get; } = new(AppPaths.SettingsFile);
+        public WorkbenchViewModel Workbench { get; }
+        public PairComparisonViewModel Pair { get; }
+        public DatasetHubViewModel Hub { get; }
+
+        public DatasetPickerFixture()
+        {
+            var registry = new ProviderRegistry([new DeterministicProvider()]);
+            var engine = new EvaluationEngine(registry);
+            var metrics = new MetricRegistry();
+            var dialogs = new TestDialogs();
+            var network = new NetworkPolicy { OfflineMode = true };
+            var cli = new EvalKitCli(Settings);
+            Workbench = new(registry, engine, metrics, dialogs, Settings, new AppLog(), network);
+            Pair = new(registry, engine, metrics, dialogs, Settings, new EvalKitCloudService(Settings, network), cli, new AppLog());
+            Hub = new(new HuggingFaceDatasets(http, network), new EvalKitDatasetCatalog(cli, Settings, network),
+                cli, Workbench, Pair, Settings, network, dialogs);
+        }
+
+        public void Dispose() { Hub.Dispose(); Pair.Dispose(); Workbench.Dispose(); http.Dispose(); }
     }
 
     [Fact]

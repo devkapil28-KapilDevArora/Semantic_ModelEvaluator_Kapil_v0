@@ -378,7 +378,7 @@ public class ProviderIntegrationTests
     }
 
     [Fact]
-    public void Psapi_dataset_check_blocks_wrong_modality_and_non_evalkit_sources()
+    public void Psapi_dataset_check_blocks_wrong_modality_and_unpersisted_sources()
     {
         var root = Fixtures.NewTempDir();
         var manifest = EvalKitFixtures.WriteDataset(Path.Combine(root, "ds"));
@@ -392,7 +392,8 @@ public class ProviderIntegrationTests
         };
         Assert.Empty(PsapiJob.CheckDataset(PsapiProvider.Find("florence")!, images));
         Assert.Contains(PsapiJob.CheckDataset(PsapiProvider.Find("palermo")!, images), e => e.Contains("TEXT corpus"));
-        Assert.Contains(PsapiJob.CheckDataset(PsapiProvider.Find("spacev6")!, Fixtures.Retrieval()), e => e.Contains("EvalKit dataset manifest"));
+        Assert.Contains(PsapiJob.CheckDataset(PsapiProvider.Find("spacev6")!, Fixtures.Retrieval()), e => e.Contains("existing prepared dataset manifest"));
+        Assert.Empty(PsapiJob.CheckDataset(PsapiProvider.Find("spacev6")!, DatasetLoader.Load(Fixtures.HelpdeskManifest)));
         Assert.Equal("inlineText", PsapiJob.TextSource(PsapiProvider.Find("spacev6")!, text));
     }
 

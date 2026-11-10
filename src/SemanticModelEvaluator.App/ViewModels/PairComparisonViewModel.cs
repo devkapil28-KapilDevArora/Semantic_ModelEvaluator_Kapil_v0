@@ -133,6 +133,7 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
     }
     public bool IncludeSampleContent { get => includeSampleContent; set => SetProperty(ref includeSampleContent, value); }
     public bool HasDataset => dataset is not null;
+    public bool HasCapturedDataset => CapturedIdentity() is not null;
 
     public string ModePlan
     {
@@ -215,6 +216,7 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         var v = PairSelection.Validate(A.Configuration, B.Configuration);
         PairValidation = string.Join("\n", v.Issues.Select(i => (i.Severity == ValidationSeverity.Error ? "✖ " : i.Severity == ValidationSeverity.Warning ? "⚠ " : "✔ ") + i.Message));
         UpdateDatasetMatch();
+        OnPropertyChanged(nameof(HasCapturedDataset));
         OnPropertyChanged(nameof(ModePlan));
     }
 
@@ -222,17 +224,18 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
     private async Task OpenDatasetAsync()
     {
         if (dialogs.Open("Dataset manifest (this app or EvalKit)|*.smds.json;*.manifest.json;*.json") is not { } path) return;
-        datasetState = null;
         await LoadDatasetAsync(path);
     }
 
-    public async Task LoadDatasetAsync(string path, string? classification = null)
+    public async Task LoadDatasetAsync(string path, string? classification = null, CancellationToken cancellationToken = default, string? datasetState = null)
     {
-        var ct = Token;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(Token, cancellationToken);
+        var ct = linked.Token;
         var ds = await Task.Run(() => path.EndsWith(".smds.json", StringComparison.OrdinalIgnoreCase)
             ? DatasetLoader.LoadManifest(path) : EvalKitFormat.LoadDataset(path, classification, ct), ct);
         if (ds.ValidationIssues.Any(i => i.Severity == ValidationSeverity.Error))
             throw new InvalidDataException(string.Join("\n", ds.ValidationIssues.Where(i => i.Severity == ValidationSeverity.Error).Select(i => i.Message)));
+        ct.ThrowIfCancellationRequested();
         dataset = ds; basis = null; Result = null; ClearResults();
         var judged = ds.Task is EvalTask.Retrieval or EvalTask.ImageTextRetrieval or EvalTask.Reranking ? ds.JudgmentCoverage : ds.LabelCoverage;
         var withText = ds.Queries.Count(q => !string.IsNullOrWhiteSpace(q.Text)) + ds.Examples.Count(e => !string.IsNullOrWhiteSpace(e.Text));
@@ -251,6 +254,7 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
             "Unjudged items are reported as unknown — never as safe, relevant or passing." +
             (ds.ValidationIssues.Count > 0 ? "\n" + string.Join("\n", ds.ValidationIssues.Take(5).Select(i => $"{i.Severity}: {i.Message}")) : "");
         OnPropertyChanged(nameof(HasDataset));
+        settings.Update(s => SettingsStore.AddRecent(s.RecentDatasets, path));
         UpdateDatasetMatch();
         Status = "Dataset loaded. Check the run/dataset match below, then choose settings.";
     }
@@ -264,7 +268,6 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         var path = await Task.Run(() => EvalKitFormat.FindCachedDataset(id, cli.DatasetCacheFor(DatasetStore.Container))
             ?? EvalKitFormat.FindCachedDataset(id, settings.Current.EvalKit.DatasetCacheDirectory), Token);
         if (path is null) { Status = $"Exact dataset {id.Name} v{id.Version} is not in the EvalKit cache. Use 'Fetch exact dataset (EvalKit CLI)'."; return; }
-        datasetState = null;
         await LoadDatasetAsync(path);
     }
 
@@ -274,8 +277,8 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         var container = DatasetStore.Container;
         if (!dialogs.Confirm($"Run the EvalKit CLI to fetch exactly {id.Name} v{id.Version} (payload {id.PayloadHash}) from {DatasetStore.Label} with your own sign-in? Only this one dataset is downloaded.")) return;
         var path = await cli.FetchDatasetAsync(id, container, new Progress<string>(s => Status = s), Token);
-        datasetState = container?.State ?? "Fetched from EvalKit's default store (published/working state not reported by the CLI)";
-        await LoadDatasetAsync(path, container?.Classification);
+        var state = container?.State ?? "Fetched from EvalKit's default store (published/working state not reported by the CLI)";
+        await LoadDatasetAsync(path, container?.Classification, datasetState: state);
     }
 
     public sealed record DatasetStoreOption(string Label, EvalKitDatasetContainer? Container)
@@ -285,11 +288,15 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
     public static IReadOnlyList<DatasetStoreOption> DatasetStores { get; } =
         [new("EvalKit default store", null), .. EvalKitDatasetContainer.Known.Select(c => new DatasetStoreOption(c.ToString(), c))];
     public DatasetStoreOption DatasetStore { get; set; } = DatasetStores[0];
-    private string? datasetState;
 
     private void UpdateDatasetMatch()
     {
-        if (dataset is null) { DatasetMatch = "Load the dataset the runs were scored against."; return; }
+        if (dataset is null)
+        {
+            DatasetMatch = HasCapturedDataset ? "Restore the exact dataset the selected runs were scored against."
+                : "Select a prepared dataset above and click Load selected dataset. Browse to download or prepare another dataset.";
+            return;
+        }
         var loaded = EvalKitDatasetIdentity.From(dataset.ToReference());
         var lines = new List<string>();
         foreach (var s in new[] { A, B })
@@ -297,7 +304,9 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
             if (s.IsPsapiLive)
             {
                 var errors = PsapiJob.CheckDataset(s.PsapiSpec!, dataset);
-                lines.Add(errors.Count == 0 ? $"✔ {s.Title}: {s.PsapiSpec!.DisplayName} will run locally through the EvalKit PSAPI backend on this exact EvalKit dataset."
+                lines.Add(errors.Count == 0 ? $"✔ {s.Title}: {s.PsapiSpec!.DisplayName} will run locally through the EvalKit PSAPI backend." +
+                    (dataset.SourcePath?.EndsWith(".smds.json", StringComparison.OrdinalIgnoreCase) == true
+                        ? " A local execution snapshot will be prepared; metrics retain the original dataset and judgments." : " This is an EvalKit dataset.")
                     : $"✖ {s.Title}: {string.Join(" ", errors)}");
                 continue;
             }
@@ -361,8 +370,11 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
             for (int i = 0; i < toRun.Count; i++)
                 evaluated[EvaluationKey(toRun[i].Configuration!, full)] = (run.Models[i], run.Dataset, depth, run.StartedAt, run.RunId);
         }
+        PsapiDatasetBridge? bridge = null;
+        if (psapi.Count > 0 && full.SourcePath!.EndsWith(".smds.json", StringComparison.OrdinalIgnoreCase))
+            bridge = await PsapiDatasetBridge.CreateAsync(full, Path.Combine(AppPaths.Root, "psapi-datasets", Guid.NewGuid().ToString("N")), Token);
         foreach (var s in psapi)
-            evaluated[EvaluationKey(s.Configuration!, full)] = await RunPsapiAsync(s, full, depth);
+            evaluated[EvaluationKey(s.Configuration!, full)] = await RunPsapiAsync(s, full, depth, bridge);
 
         PairSide Side(PairSideViewModel s)
         {
@@ -383,7 +395,8 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         var pairSettings = BuildSettings(sampleLimit > 0 ? ids : null);
         basis = (a, b, ds, pairSettings);
         await CompareAsync(Token);
-        Status = (toRun.Count > 0 ? $"Invoked {string.Join(", ", toRun.Select(s => s.Title))}; " : "No model invoked; ") +
+        var invoked = toRun.Concat(psapi).ToList();
+        Status = (invoked.Count > 0 ? $"Invoked {string.Join(", ", invoked.Select(s => s.Title))}; " : "No model invoked; ") +
             $"loaded/compared results. {result?.Recommendation.Headline}";
     }
 
@@ -391,7 +404,7 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
     /// Live PSAPI evaluation: writes an EvalKit job for the external PSAPI backend, runs it locally (CPU, no network) and loads its output.
     /// The job, log and outputs are kept under the app data folder for reproducibility.
     /// </summary>
-    private async Task<(ModelRunResult Result, DatasetReference Dataset, int Depth, DateTimeOffset At, string RunId)> RunPsapiAsync(PairSideViewModel s, EvalDataset full, int depth)
+    private async Task<(ModelRunResult Result, DatasetReference Dataset, int Depth, DateTimeOffset At, string RunId)> RunPsapiAsync(PairSideViewModel s, EvalDataset full, int depth, PsapiDatasetBridge? bridge)
     {
         var spec = s.PsapiSpec!;
         var status = PsapiBackendStatus.Probe(cli);
@@ -400,13 +413,15 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         var folder = Path.Combine(AppPaths.Root, "psapi-runs", name);
         Directory.CreateDirectory(folder);
         var jobPath = Path.Combine(folder, name + ".job.json");
-        var job = PsapiJob.Build(spec, full.SourcePath!, status.PackageDirectory!, depth, name, PsapiJob.TextSource(spec, full));
+        var job = PsapiJob.Build(spec, bridge?.ManifestPath ?? full.SourcePath!, status.PackageDirectory!, depth, name,
+            bridge is null ? PsapiJob.TextSource(spec, full) : "inlineText");
         await File.WriteAllTextAsync(jobPath, job.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }), Token);
         Status = $"{s.Title}: running {spec.DisplayName} through the EvalKit PSAPI backend (local CPU)...";
         var output = await cli.RunJobAsync(jobPath, Path.Combine(folder, "output"), new Progress<string>(line => Status = $"{s.Title} · {spec.DisplayName}: {line}"), Token);
         var metrics = EvalKitFormat.FindMetricsFiles(output);
         if (metrics.Count != 1) throw new InvalidDataException($"{spec.DisplayName}: expected one EvalKit metrics envelope in the run output, found {metrics.Count}.");
         var ek = EvalKitFormat.ReadRun(metrics[0], null, full.DataClassification);
+        var runDataset = bridge?.MatchResult(ek.Dataset) ?? PairSideViewModel.RunDatasetOf(ek);
         if (ek.BackendModelId is { } reported && !string.Equals(reported, spec.ModelId, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"The backend reported model '{reported}' but '{spec.ModelId}' was requested; the run was discarded.");
         var loaded = await Task.Run(() => EvalKitFormat.ReadResults(ek, Math.Max(depth, 1000), Token, full.Queries.Select(q => q.Id).ToList()), Token);
@@ -429,9 +444,11 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         };
         if (ek.FailedQueryCount > 0) { result.FailedItems = ek.FailedQueryCount; result.Warnings.Add($"EvalKit reported {ek.FailedQueryCount} failed queries (onQueryError=skip)."); }
         result.Warnings.Add("Latency is EvalKit's whole-run query duration divided by query count (no per-query latencies are recorded), so P50/P95/P99 are unknown.");
+        if (bridge is not null)
+            result.Warnings.Add($"Local PSAPI adapter payload {bridge.ExecutionIdentity.PayloadHash} verified. App metrics use the original dataset's judgments, not EvalKit's converted summary metrics.");
         psapiNotes[EvaluationKey(s.Configuration!, full)] = $"New evaluation: EvalKit job '{name}' on the local PSAPI backend ({ek.BatchMetadata})";
         log.Write(LogLevel.Info, "psapi", $"PSAPI run {name}: job and outputs saved under the app data folder psapi-runs\\{name}.");
-        return (result, PairSideViewModel.RunDatasetOf(ek), depth, at, ek.RunId);
+        return (result, runDataset, depth, at, ek.RunId);
     }
     private readonly Dictionary<string, string> psapiNotes = [];
 

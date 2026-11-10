@@ -125,8 +125,8 @@ public static class EvalKitFormat
             RunId = Str(root["run_id"]) ?? Str(evalkit?["run_id"]) ?? Path.GetFileName(metricsPath).Replace(".metrics.json", "", StringComparison.OrdinalIgnoreCase),
             Name = Str(description?["name"]) ?? Path.GetFileName(metricsPath).Replace(".metrics.json", "", StringComparison.OrdinalIgnoreCase),
             CreatedAt = DateTimeOffset.TryParse(Str(description?["created_at"]), out var created) ? created : null,
-            Dataset = new(Str(inputs?["dataset"]) ?? Str(resultManifest?["dataset"]),
-                Str(inputs?["dataset_version"]) ?? Str(resultManifest?["dataset_version"]),
+            Dataset = new(Str(inputs?["manifest"]?["name"]) ?? Str(inputs?["dataset"]) ?? Str(resultManifest?["dataset"]),
+                Str(inputs?["manifest"]?["version"]) ?? Str(inputs?["dataset_version"]) ?? Str(resultManifest?["dataset_version"]),
                 Str(inputs?["dataset_payload_hash"])),
             Backend = Str(config?["backend"]),
             BackendVersion = Str(config?["backend_version"]),
@@ -154,13 +154,33 @@ public static class EvalKitFormat
         return run;
     }
 
-    /// <summary>Resolves the query-results JSONL referenced by results.path (or &lt;stem&gt;.query-results.jsonl).</summary>
+    /// <summary>Follows inputs.query_results to its rankings envelope, with legacy direct-JSONL support.</summary>
     public static string ResolveQueryResults(string metricsPath)
     {
         var dir = Path.GetDirectoryName(Path.GetFullPath(metricsPath))!;
         var root = JsonNode.Parse(File.ReadAllText(metricsPath));
+        if (Str(root?["inputs"]?["query_results"]?["path"]) is { } envelope)
+        {
+            var envelopePath = SafeChild(dir, envelope);
+            var queries = JsonNode.Parse(File.ReadAllText(envelopePath));
+            if (Str(root?["inputs"]?["dataset_payload_hash"]) is { } payload &&
+                !string.Equals(payload, Str(queries?["inputs"]?["dataset_payload_hash"]), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Query-results and metrics envelopes record different dataset payloads.");
+            var reference = queries?["results"];
+            var rows = Str(reference?["path"]) ?? throw new InvalidDataException("Query-results envelope has no rankings file reference.");
+            var full = SafeChild(Path.GetDirectoryName(envelopePath)!, rows);
+            if (Str(reference?["hash"]) is { } expected)
+            {
+                using var stream = File.OpenRead(full);
+                var actual = "sha256:" + Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+                if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Query-results file does not match its envelope hash.");
+            }
+            if (!File.Exists(full)) throw new FileNotFoundException("The referenced query-results file is missing.", full);
+            return full;
+        }
         var declared = Str(root?["results"]?["path"]);
-        if (declared is not null)
+        if (declared is not null && !declared.EndsWith(".metrics.jsonl", StringComparison.OrdinalIgnoreCase))
         {
             var full = SafeChild(dir, Path.GetFileName(declared));
             if (File.Exists(full)) return full;

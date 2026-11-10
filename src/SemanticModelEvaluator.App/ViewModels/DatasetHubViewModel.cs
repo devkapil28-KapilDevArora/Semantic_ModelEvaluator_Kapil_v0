@@ -17,7 +17,11 @@ using SemanticModelEvaluator.Providers.EvalKit;
 namespace SemanticModelEvaluator.App.ViewModels;
 
 public sealed record DatasetCard(string Name, DatasetSource Source, string Version, string Task, string Modality,
-    string Examples, string Judgments, string Access, string Approval, string Cache, string? Manifest = null, EvalKitDatasetEntry? Internal = null);
+    string Examples, string Judgments, string Access, string Approval, string Cache, string? Manifest = null, EvalKitDatasetEntry? Internal = null)
+{
+    public string SelectionLabel => $"{Name} | {Source} | {Task} | {Version}";
+    public override string ToString() => SelectionLabel;
+}
 
 public sealed class DatasetColumnChoice(string column, ColumnRole role) : ObservableObject
 {
@@ -41,6 +45,7 @@ public sealed class DatasetHubViewModel : ObservableObject, IDisposable
     private int sourceIndex;
     private string filter = "", repository = "BeIR/scifact", revision = "main", status = "Choose a public starter, or list your authorized internal catalog. Downloaded datasets run locally; no dataset content is sent to Hugging Face.";
     private DatasetCard? selected;
+    private DatasetCard? selectedReady;
     private HubDatasetInfo? info;
     private HubDatasetFile? selectedFile;
     private HubDatasetConfiguration? configuration;
@@ -70,7 +75,8 @@ public sealed class DatasetHubViewModel : ObservableObject, IDisposable
         AddInputCommand = Command(AddInputAsync);
         BuildCommand = Command(BuildAsync);
         UseCommand = Command(async () => { await workbench.LoadDatasetAsync(RequireManifest()); workbench.Page = 2; });
-        UsePairCommand = Command(async () => { await pair.LoadDatasetAsync(RequireManifest()); workbench.TabIndex = 0; });
+        UsePairCommand = Command(() => LoadPairAsync(Selected));
+        LoadSelectedPairCommand = Command(() => LoadPairAsync(SelectedReady));
         RemoveDownloadCommand = Command(() =>
         {
             if (info is null || SelectedFile is null) throw new InvalidOperationException("Select a pinned Hub file.");
@@ -88,6 +94,8 @@ public sealed class DatasetHubViewModel : ObservableObject, IDisposable
     }
 
     public ObservableCollection<DatasetCard> Cards { get; } = [];
+    public IEnumerable<DatasetCard> ReadyDatasets => Cards.Where(c => c.Manifest is not null).OrderBy(c => c.Name).ThenBy(c => c.Version);
+    public DatasetCard? SelectedReady { get => selectedReady; set => SetProperty(ref selectedReady, value); }
     public IEnumerable<DatasetCard> VisibleCards => Cards.Where(c =>
         (SourceIndex == 0 || c.Source == (SourceIndex == 1 ? DatasetSource.HuggingFace : SourceIndex == 2 ? DatasetSource.MicrosoftInternal : DatasetSource.Local)) &&
         (Filter.Length == 0 || c.Name.Contains(Filter, StringComparison.OrdinalIgnoreCase))).OrderBy(c => c.Name).ThenBy(c => c.Version);
@@ -162,6 +170,7 @@ public sealed class DatasetHubViewModel : ObservableObject, IDisposable
     public IAsyncRelayCommand BuildCommand { get; }
     public IAsyncRelayCommand UseCommand { get; }
     public IAsyncRelayCommand UsePairCommand { get; }
+    public IAsyncRelayCommand LoadSelectedPairCommand { get; }
     public IAsyncRelayCommand RemoveDownloadCommand { get; }
     public IRelayCommand CancelCommand { get; }
     public IRelayCommand ClearInputsCommand { get; }
@@ -175,14 +184,29 @@ public sealed class DatasetHubViewModel : ObservableObject, IDisposable
         try { await action(); }
         catch (OperationCanceledException) { Status = "Cancelled. Verified cached files are kept; partial public downloads can be resumed with Download / Retry."; }
         catch (Exception ex) { Status = "Dataset operation failed: " + Redactor.Redact(ex.Message); }
-        finally { operation = null; Busy = false; OnPropertyChanged(nameof(VisibleCards)); }
+        finally { operation = null; Busy = false; }
     });
     private CancellationToken Token => operation?.Token ?? CancellationToken.None;
     private void AddCard(DatasetCard card)
     {
+        var readyPath = SelectedReady?.Manifest;
         var old = Cards.FirstOrDefault(c => c.Name == card.Name && c.Version == card.Version && c.Source == card.Source);
         if (old is not null) Cards.Remove(old);
-        Cards.Add(card); Selected = card; OnPropertyChanged(nameof(VisibleCards));
+        Cards.Add(card);
+        OnPropertyChanged(nameof(VisibleCards));
+        OnPropertyChanged(nameof(ReadyDatasets));
+        Selected = card;
+        SelectedReady = ReadyDatasets.FirstOrDefault(c => c.Manifest == readyPath) ?? ReadyDatasets.FirstOrDefault();
+    }
+    private async Task LoadPairAsync(DatasetCard? card)
+    {
+        if (card?.Manifest is not { } path)
+            throw new InvalidOperationException("Select a prepared dataset. Use Browse to download a public starter or fetch an authorized internal version first; selecting a container or catalog entry alone does not load data.");
+        Status = $"Loading {card.Name} into Step 3...";
+        await pair.LoadDatasetAsync(path, cancellationToken: Token);
+        SelectedReady = card;
+        Status = $"Loaded {card.Name} into Step 3. Check model compatibility below before running the evaluation.";
+        workbench.TabIndex = 0;
     }
     private async Task SearchAsync()
     {
@@ -225,6 +249,7 @@ public sealed class DatasetHubViewModel : ObservableObject, IDisposable
         settings.Update(s => SettingsStore.AddRecent(s.RecentDatasets, path));
         SourceIndex = 0; Filter = "";
         AddLocalCard(path);
+        SelectedReady = Selected;
         Status = "Starter is ready and selected. Choose 'Use in two-model comparison' or 'Add to evaluation'. No manual column mapping is needed.";
     }
     private async Task LocalTableAsync()
@@ -267,6 +292,7 @@ public sealed class DatasetHubViewModel : ObservableObject, IDisposable
         var path = await DatasetImport.BuildAsync(DatasetName, Task, Inputs.ToArray(), RowsPerFile, root, Token);
         settings.Update(s => SettingsStore.AddRecent(s.RecentDatasets, path));
         AddLocalCard(path);
+        SelectedReady = Selected;
         Status = "Normalized dataset saved with pinned inputs, subset/mapping fingerprint and image hashes. Preview it, then add to evaluation.";
     }
     private void AddLocalCard(string path)
@@ -288,11 +314,16 @@ public sealed class DatasetHubViewModel : ObservableObject, IDisposable
     }
     private Task RefreshLocalAsync()
     {
+        var selectedPath = Selected?.Manifest;
+        var readyPath = SelectedReady?.Manifest;
         var paths = settings.Current.RecentDatasets.Where(File.Exists).Where(p =>
             p.EndsWith(".smds.json", StringComparison.OrdinalIgnoreCase) || File.Exists(p + ".smeval-handling.json")).ToList();
         var samples = Path.Combine(AppContext.BaseDirectory, "samples");
         if (Directory.Exists(samples)) paths.AddRange(Directory.EnumerateFiles(samples, "*.smds.json", SearchOption.AllDirectories));
         foreach (var path in paths.Distinct(StringComparer.OrdinalIgnoreCase)) AddLocalCard(path);
+        SelectedReady = ReadyDatasets.FirstOrDefault(c => c.Manifest == readyPath)
+            ?? ReadyDatasets.FirstOrDefault(c => c.Manifest == paths.FirstOrDefault()) ?? ReadyDatasets.FirstOrDefault();
+        Selected = Cards.FirstOrDefault(c => c.Manifest == selectedPath) ?? SelectedReady;
         Status = "Recent and bundled datasets listed. Existing Dataset Studio imports remain available.";
         return System.Threading.Tasks.Task.CompletedTask;
     }
@@ -313,6 +344,7 @@ public sealed class DatasetHubViewModel : ObservableObject, IDisposable
         var path = await cli.FetchDatasetAsync(new(entry.Name, entry.Version, PayloadHash), entry.Container, new Progress<string>(s => Status = s), Token);
         settings.Update(s => SettingsStore.AddRecent(s.RecentDatasets, path));
         AddCard(card with { Manifest = path, Cache = "Cached; exact run identity matched" });
+        SelectedReady = Selected;
         Status = "Exact dataset retrieved through EvalKit; no substitute version was attached.";
     }
     private async Task FetchNewAsync()
@@ -324,7 +356,8 @@ public sealed class DatasetHubViewModel : ObservableObject, IDisposable
         var path = await cli.FetchCatalogDatasetAsync(entry, new Progress<string>(s => Status = s), Token);
         settings.Update(s => SettingsStore.AddRecent(s.RecentDatasets, path));
         AddCard(card with { Manifest = path, Cache = "Cached; selected version verified" });
-        Status = "Dataset cached for a new evaluation. Select Add to evaluation or Use in two-model comparison; saved-run identity checks remain enforced.";
+        SelectedReady = Selected;
+        Status = "Dataset cached for a new evaluation. Select Load in Step 3 (two-model comparison) or Load in batch evaluation; saved-run identity checks remain enforced.";
     }
     private string RequireManifest() => Selected?.Manifest ?? throw new InvalidOperationException("Select a cached normalized or exact EvalKit dataset first.");
     private async Task PreviewAsync()

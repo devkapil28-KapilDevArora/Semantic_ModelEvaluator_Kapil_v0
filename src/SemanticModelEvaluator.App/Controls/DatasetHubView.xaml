@@ -32,8 +32,8 @@
      <TextBox Text="{Binding Filter, UpdateSourceTrigger=PropertyChanged}" Width="240" AutomationProperties.Name="Dataset filter"/>
      <Button Content="Refresh local / recent" Command="{Binding RefreshCommand}"/>
      <Button Content="Preview selected" Command="{Binding PreviewCommand}"/>
-     <Button Content="Add to evaluation" Command="{Binding UseCommand}" AutomationProperties.AutomationId="DatasetHubUse"/>
-     <Button Content="Use in two-model comparison" Command="{Binding UsePairCommand}"/>
+     <Button Content="Load in Step 3 (two-model comparison)" Command="{Binding UsePairCommand}" AutomationProperties.AutomationId="DatasetHubUsePair"/>
+     <Button Content="Load in batch evaluation (separate workflow)" Command="{Binding UseCommand}" AutomationProperties.AutomationId="DatasetHubUse"/>
     </WrapPanel>
     <DataGrid ItemsSource="{Binding VisibleCards}" SelectedItem="{Binding Selected}" AutoGenerateColumns="False"
       IsReadOnly="True" Height="220" EnableRowVirtualization="True" AutomationProperties.AutomationId="DatasetCatalog">

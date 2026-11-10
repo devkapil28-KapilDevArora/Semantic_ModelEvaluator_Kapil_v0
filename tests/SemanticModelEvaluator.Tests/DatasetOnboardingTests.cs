@@ -4,8 +4,10 @@ using System.Text;
 using System.Text.Json.Nodes;
 using SemanticModelEvaluator.Core.Datasets;
 using SemanticModelEvaluator.Core.EvalKit;
+using SemanticModelEvaluator.Core.Evaluation;
 using SemanticModelEvaluator.Core.Models;
 using SemanticModelEvaluator.Core.Security;
+using SemanticModelEvaluator.Providers;
 using SemanticModelEvaluator.Providers.Datasets;
 using SemanticModelEvaluator.Providers.EvalKit;
 using Xunit;
@@ -35,6 +37,104 @@ public sealed class DatasetOnboardingTests : IDisposable
     };
 
     private static HttpResponseMessage Reply(string text) => new(HttpStatusCode.OK) { Content = new StringContent(text) };
+
+    [Fact]
+    public void Live_evalkit_manifest_reference_supplies_exact_run_identity()
+    {
+        var path = Path.Combine(root, "live.metrics.json");
+        File.WriteAllText(path, """
+            {"schema_version":3,"run_id":"live",
+             "inputs":{"manifest":{"name":"public image input","version":"abc123","path":"../dataset/dataset.manifest.json"},
+                       "dataset_payload_hash":"sha256:abc"},
+             "evalkit":{"effective_config":{"parameters":{"model_id":"genoa"}}}}
+            """);
+        var run = EvalKitFormat.ReadRun(path);
+        Assert.Equal(new EvalKitDatasetIdentity("public image input", "abc123", "sha256:abc"), run.Dataset);
+        Assert.Equal("genoa", run.BackendModelId);
+        Assert.NotEmpty(run.Dataset.Mismatches(new("public image input", "different", "sha256:abc")));
+    }
+
+    [Fact]
+    public void Live_evalkit_reader_follows_rankings_envelope_not_metric_rows_and_verifies_integrity()
+    {
+        var ranks = """{"query_id":"q1","document_id":"d1","position":1,"score":0.75}""";
+        File.WriteAllText(Path.Combine(root, "ranks.jsonl"), ranks);
+        File.WriteAllText(Path.Combine(root, "run.metrics.jsonl"), """{"query_id":"q1","ndcg":1}""");
+        var hash = "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ranks))).ToLowerInvariant();
+        var envelope = new JsonObject
+        {
+            ["inputs"] = new JsonObject { ["dataset_payload_hash"] = "sha256:fixture" },
+            ["results"] = new JsonObject { ["path"] = "ranks.jsonl", ["hash"] = hash }
+        };
+        var envelopePath = Path.Combine(root, "run.query-results.json");
+        File.WriteAllText(envelopePath, envelope.ToJsonString());
+        var path = Path.Combine(root, "run.metrics.json");
+        File.WriteAllText(path, """
+            {"schema_version":3,"query_count":1,"failed_query_count":0,
+             "inputs":{"query_results":{"path":"run.query-results.json"},"dataset_payload_hash":"sha256:fixture"},
+             "results":{"path":"run.metrics.jsonl"}}
+            """);
+        var run = EvalKitFormat.ReadRun(path);
+        var result = EvalKitFormat.ReadResults(run);
+        Assert.Equal(0.75, Assert.Single(Assert.Single(result.Queries).Results).Score);
+        Assert.Equal(RunStatus.Completed, result.Status);
+        File.AppendAllText(Path.Combine(root, "ranks.jsonl"), "\nchanged");
+        Assert.Throws<InvalidDataException>(() => EvalKitFormat.ReadResults(run));
+        envelope["inputs"]!["dataset_payload_hash"] = "sha256:other";
+        File.WriteAllText(envelopePath, envelope.ToJsonString());
+        Assert.Throws<InvalidDataException>(() => EvalKitFormat.ReadResults(run));
+        File.Delete(envelopePath);
+        Assert.Throws<FileNotFoundException>(() => EvalKitFormat.ReadResults(run));
+    }
+
+    [Fact]
+    public async Task Psapi_bridge_preserves_image_ids_payload_integrity_and_original_unknown_safety()
+    {
+        var image = Path.Combine(root, "image.png");
+        await File.WriteAllBytesAsync(image, Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZusAAAAASUVORK5CYII="));
+        var rows = Path.Combine(root, "captions.jsonl");
+        await File.WriteAllTextAsync(rows, """{"caption":"a tiny image","image":"image.png"}""");
+        var mapping = new TableMapping { Kind = TableKind.Documents, Format = TableFormat.JsonLines, Confirmed = true,
+            Columns = new() { ["caption"] = ColumnRole.Text, ["image"] = ColumnRole.ImagePath } };
+        var path = await DatasetImport.BuildAsync("Image fixture", EvalTask.ImageTextRetrieval,
+            [new(rows, mapping, CaptionPairs: true)], 10, Path.Combine(root, "native"), default);
+        var source = DatasetLoader.Load(path);
+        Assert.Empty(PsapiJob.CheckDataset(PsapiProvider.Find("genoa")!, source));
+        var bridge = await PsapiDatasetBridge.CreateAsync(source, Path.Combine(root, "bridge"), default);
+        var snapshot = EvalKitFormat.LoadDataset(bridge.ManifestPath);
+        Assert.Equal(source.Queries.Select(q => (q.Id, q.Text)), snapshot.Queries.Select(q => (q.Id, q.Text)));
+        Assert.Equal(source.Documents.Select(d => d.Id), snapshot.Documents.Select(d => d.Id));
+        Assert.Equal(await File.ReadAllBytesAsync(source.Documents[0].ImagePath!), await File.ReadAllBytesAsync(snapshot.Documents[0].ImagePath!));
+        Assert.False(source.HasSafetyJudgments);
+        Assert.Null(Assert.Single(source.Judgments).Harmful);
+        Assert.Equal(source.ToReference().ContentHash, bridge.MatchResult(EvalKitDatasetIdentity.From(snapshot.ToReference())).ContentHash);
+        Assert.Throws<InvalidDataException>(() => bridge.MatchResult(bridge.ExecutionIdentity with { PayloadHash = "sha256:wrong" }));
+        var repeated = await PsapiDatasetBridge.CreateAsync(source, Path.Combine(root, "bridge2"), default);
+        Assert.Equal(bridge.ExecutionIdentity, repeated.ExecutionIdentity);
+        await File.AppendAllTextAsync(Path.Combine(root, "bridge", "queries.jsonl"), "\nchanged");
+        Assert.Throws<InvalidDataException>(() => EvalKitFormat.LoadDataset(bridge.ManifestPath));
+
+        source.Queries[0] = source.Queries[0] with { ImagePath = image };
+        Assert.Contains(PsapiJob.CheckDataset(PsapiProvider.Find("genoa")!, source), e => e.Contains("text queries"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => PsapiDatasetBridge.CreateAsync(source, Path.Combine(root, "unsupported"), default));
+    }
+
+    [Fact]
+    public async Task Psapi_bridge_preserves_text_and_rejects_stale_native_content()
+    {
+        var source = DatasetLoader.Load(Fixtures.HelpdeskManifest);
+        var bridge = await PsapiDatasetBridge.CreateAsync(source, Path.Combine(root, "text"), default);
+        var snapshot = EvalKitFormat.LoadDataset(bridge.ManifestPath);
+        Assert.Equal(source.Documents.Select(d => (d.Id, d.Text)), snapshot.Documents.Select(d => (d.Id, d.Text)));
+        Assert.Equal(source.Queries.Count, snapshot.Queries.Count);
+        var stale = new EvalDataset { Id = source.Id, Name = source.Name, SourcePath = source.SourcePath, ContentHash = "stale", Task = source.Task,
+            Queries = source.Queries, Documents = source.Documents };
+        await Assert.ThrowsAsync<InvalidDataException>(() => PsapiDatasetBridge.CreateAsync(stale, Path.Combine(root, "stale"), default));
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PsapiDatasetBridge.CreateAsync(source, Path.Combine(root, "cancelled"), cancelled.Token));
+        Assert.False(Directory.Exists(Path.Combine(root, "cancelled")));
+    }
 
     [Fact]
     public async Task StarterPinsDownloadsNormalizesAndReusesVerifiedCache()

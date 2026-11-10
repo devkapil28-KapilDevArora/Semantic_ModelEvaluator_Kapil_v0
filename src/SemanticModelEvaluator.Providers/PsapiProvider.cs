@@ -277,10 +277,12 @@ public static class PsapiJob
     public static IReadOnlyList<string> CheckDataset(PsapiModelSpec spec, EvalDataset ds)
     {
         var errors = new List<string>();
-        if (ds.Task != EvalTask.Retrieval) errors.Add($"PSAPI models are evaluated on retrieval datasets; this dataset's task is {ds.Task}.");
-        if (ds.SourcePath is not { } path || path.EndsWith(".smds.json", StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
-            errors.Add("PSAPI runs through EvalKit, which needs an EvalKit dataset manifest (*.manifest.json from the EvalKit cache or a local EvalKit dataset). This app's .smds.json datasets cannot be passed to EvalKit.");
+        if (ds.Task is not (EvalTask.Retrieval or EvalTask.ImageTextRetrieval)) errors.Add($"PSAPI models are evaluated on retrieval datasets; this dataset's task is {ds.Task}.");
+        if (ds.SourcePath is not { } path || !File.Exists(path))
+            errors.Add("PSAPI needs an existing prepared dataset manifest (.smds.json or EvalKit .manifest.json).");
         if (ds.Queries.Count == 0) errors.Add("The dataset has no queries.");
+        if (ds.Queries.Any(q => q.ImagePath is not null || string.IsNullOrWhiteSpace(q.Text)))
+            errors.Add("PSAPI requires text queries; image-query retrieval is not supported by this backend.");
         if (ds.Documents.Count == 0) errors.Add("The dataset has no corpus documents.");
         int images = ds.Documents.Count(d => d.ImagePath is not null);
         if (spec.Corpus == PsapiCorpus.Image && images == 0)

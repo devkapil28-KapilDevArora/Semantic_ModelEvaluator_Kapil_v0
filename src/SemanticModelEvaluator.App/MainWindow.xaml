@@ -85,7 +85,7 @@
          <Button Content="Validate run" Command="{Binding ValidateCommand}" HorizontalAlignment="Left"/>
         </StackPanel>
         <TextBlock Visibility="{Binding IsPsapiLive, Converter={StaticResource BoolVisibility}}" TextWrapping="Wrap" Margin="0,6,0,0" Foreground="{DynamicResource MutedBrush}"
-                   Text="PSAPI: runs the whole dataset as an EvalKit job on the local CPU backend (no network). Needs an EvalKit dataset manifest; Florence and Genoa need an image corpus, Space v6 and Palermo a text corpus."/>
+                   Text="PSAPI: runs the whole dataset as an EvalKit job on the local CPU backend (no network). Accepts prepared app or EvalKit datasets with text queries; Florence and Genoa need an image corpus, Space v6 and Palermo a text corpus."/>
         <Expander Header="Configuration details (advanced)" Margin="0,8,0,0" AutomationProperties.Name="{Binding Title, StringFormat='{}{0} configuration details'}">
          <TextBlock Text="{Binding ModelDetail}" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12" Margin="0,4,0,0"/>
         </Expander>
@@ -130,15 +130,33 @@
       </GroupBox>
       <GroupBox Header="Step 3 · Dataset and evaluation">
        <StackPanel>
+        <StackPanel DataContext="{Binding DataContext, ElementName=DatasetHubTab}">
+         <TextBlock Text="Choose a prepared dataset, then load it. Browsing, selecting a row or choosing a storage container does not load a dataset." TextWrapping="Wrap" Margin="4"/>
+         <WrapPanel IsEnabled="{Binding Idle}">
+          <ComboBox ItemsSource="{Binding ReadyDatasets}" SelectedItem="{Binding SelectedReady}" DisplayMemberPath="SelectionLabel"
+                    Width="620" AutomationProperties.AutomationId="PairDatasetPicker" AutomationProperties.Name="Prepared dataset for Step 3"/>
+          <Button Content="Load selected dataset" Command="{Binding LoadSelectedPairCommand}" AutomationProperties.AutomationId="PairLoadSelectedDataset"/>
+          <Button Content="Refresh datasets" Command="{Binding RefreshCommand}"/>
+         </WrapPanel>
+         <TextBlock Text="{Binding Status}" TextWrapping="Wrap" Margin="4" AutomationProperties.LiveSetting="Polite" AutomationProperties.AutomationId="PairDatasetLoadStatus"/>
+        </StackPanel>
         <WrapPanel>
          <Button Content="Browse public / internal datasets..." Click="BrowseDatasets" AutomationProperties.AutomationId="PairBrowseDatasets"/>
          <Button Content="Open dataset manifest..." Command="{Binding OpenDatasetCommand}" AutomationProperties.AutomationId="PairOpenDataset"/>
-         <Button Content="Use exact cached EvalKit dataset" Command="{Binding FindCachedDatasetCommand}"/>
-         <ComboBox ItemsSource="{Binding DatasetStores}" SelectedItem="{Binding DatasetStore}" MinWidth="260" Margin="8,0,4,0" AutomationProperties.Name="Dataset container (published or working, sensitivity)" ToolTip="Published or working (staging) dataset container to fetch from. Azure enforces your access; no other container is tried."/>
-         <Button Content="Fetch exact dataset (EvalKit CLI)..." Command="{Binding FetchDatasetCommand}"/>
         </WrapPanel>
+        <Expander Header="Existing scored runs only: restore their exact EvalKit dataset" IsExpanded="{Binding HasCapturedDataset, Mode=OneWay}" Margin="4,6">
+         <StackPanel>
+          <TextBlock Text="These controls require a captured run selected in Steps 1–2. The container selects where to fetch; it is not a dataset selector." TextWrapping="Wrap"/>
+          <WrapPanel IsEnabled="{Binding HasCapturedDataset}">
+           <Button Content="Use exact cached EvalKit dataset" Command="{Binding FindCachedDatasetCommand}"/>
+           <ComboBox ItemsSource="{Binding DatasetStores}" SelectedItem="{Binding DatasetStore}" MinWidth="260" Margin="8,0,4,0" AutomationProperties.Name="Dataset container (published or working, sensitivity)" ToolTip="Published or working (staging) dataset container to fetch from. Azure enforces your access; no other container is tried."/>
+           <Button Content="Fetch exact dataset (EvalKit CLI)..." Command="{Binding FetchDatasetCommand}"/>
+          </WrapPanel>
+         </StackPanel>
+        </Expander>
         <TextBlock Text="{Binding DatasetInfo}" TextWrapping="Wrap" Margin="4,8" AutomationProperties.AutomationId="PairDatasetInfo"/>
         <TextBlock Text="{Binding DatasetMatch}" TextWrapping="Wrap" Margin="4,0,4,8" FontWeight="SemiBold" AutomationProperties.AutomationId="PairDatasetMatch"/>
+        <TextBlock Text="{Binding Status}" TextWrapping="Wrap" Margin="4" AutomationProperties.AutomationId="PairDatasetOperationStatus"/>
         <Expander Header="Comparison eligibility rules">
          <ItemsControl ItemsSource="{Binding EligibilityRules}" Margin="8,4"><ItemsControl.ItemTemplate><DataTemplate><TextBlock Text="{Binding StringFormat='• {0}'}" TextWrapping="Wrap"/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
         </Expander>
