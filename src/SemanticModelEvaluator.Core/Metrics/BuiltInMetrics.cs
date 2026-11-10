@@ -35,6 +35,14 @@ public static class BuiltInMetrics
             (ctx, q, rel) => Ndcg(ctx, q), RelevantOnly),
         Retrieval("hit_rate_at_k", "Hit rate@K", "Share of queries with at least one relevant retained result in the top K.",
             (ctx, q, rel) => q.Retained.Any(d => IsRelevant(ctx, q.QueryId, d.DocumentId)) ? 1 : 0, RelevantOnly),
+        Retrieval("map_at_k", "MAP@K", "Mean average precision: for each query, the sum of precision at every rank (≤ K) holding a relevant retained result, divided by min(relevant judged documents, K); averaged over queries. Binary relevance (grade > 0).",
+            (ctx, q, rel) =>
+            {
+                double hits = 0, sum = 0;
+                for (int i = 0; i < Math.Min(q.Retained.Count, ctx.K); i++)
+                    if (IsRelevant(ctx, q.QueryId, q.Retained[i].DocumentId)) { hits++; sum += hits / (i + 1); }
+                return sum / Math.Min(rel, ctx.K);
+            }, RelevantOnly),
 
         new DelegateMetric(new("empty_query_rate", "Empty-query rate", "1", RetrievalTasks, MetricInput.RankedResults, 0, 1, Direction.LowerIsBetter,
             MetricCategory.Coverage, "Fraction of evaluated queries", "Failed queries are excluded and counted as missing.",

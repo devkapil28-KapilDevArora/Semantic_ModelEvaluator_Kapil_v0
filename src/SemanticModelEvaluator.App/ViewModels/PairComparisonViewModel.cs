@@ -23,6 +23,7 @@ namespace SemanticModelEvaluator.App.ViewModels;
 public sealed record PairMetricView(string Name, string Category, string Direction, string A, string B, string Delta, string Better,
     double BarA, double BarB, bool HasBars, string Note);
 public sealed record PairPerformanceView(string Name, string A, string B, string Delta, string Basis);
+public sealed record PairCompatibilityView(string Aspect, string StatusText, string Detail);
 public sealed record PairCountView(string Name, string A, string B);
 public sealed record PairHeatCell(string Metric, string Text, string Background, string Tooltip);
 
@@ -95,7 +96,7 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
     public IReadOnlyList<SourceOption> SourceOptions => PairSideViewModel.SourceOptions;
     public IReadOnlyList<string> EligibilityRules => PairComparer.EligibilityRules;
     public static IReadOnlyList<string> RowFilters { get; } =
-        ["All", "Model A wins", "Model B wins", "Ties", "Disagreements", "Safety concerns", "Empty results", "Errors", "Unjudged", "Unknown outcome"];
+        ["All", "Model A wins", "Model B wins", "Ties", "Disagreements", "Relevant items missed", "Safety concerns", "Empty results", "Errors", "Unjudged", "Missing content", "Unknown outcome"];
 
     public bool Busy { get => busy; private set { if (SetProperty(ref busy, value)) OnPropertyChanged(nameof(NotBusy)); } }
     public bool NotBusy => !busy;
@@ -159,6 +160,9 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
     public string Warnings { get; private set; } = "";
     public string Strengths { get; private set; } = "";
     public string Limitations { get; private set; } = "";
+    public List<PairCompatibilityView> CompatibilityRows { get; private set; } = [];
+    public string AgreementText { get; private set; } = "";
+    private HashSet<string> relevantQueries = new(StringComparer.Ordinal);
     public List<PairMetricView> MetricRows { get; private set; } = [];
     public List<PairPerformanceView> PerformanceRows { get; private set; } = [];
     public List<PairCountView> Counts { get; private set; } = [];
@@ -257,7 +261,8 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
     private async Task FindCachedDatasetAsync()
     {
         var id = CapturedIdentity() ?? throw new InvalidOperationException("Select a captured run first; its exact dataset name, version and payload hash are used.");
-        var path = await Task.Run(() => EvalKitFormat.FindCachedDataset(id, settings.Current.EvalKit.DatasetCacheDirectory), Token);
+        var path = await Task.Run(() => EvalKitFormat.FindCachedDataset(id, cli.DatasetCacheFor(DatasetStore.Container))
+            ?? EvalKitFormat.FindCachedDataset(id, settings.Current.EvalKit.DatasetCacheDirectory), Token);
         if (path is null) { Status = $"Exact dataset {id.Name} v{id.Version} is not in the EvalKit cache. Use 'Fetch exact dataset (EvalKit CLI)'."; return; }
         datasetState = null;
         await LoadDatasetAsync(path);
@@ -289,6 +294,13 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         var lines = new List<string>();
         foreach (var s in new[] { A, B })
         {
+            if (s.IsPsapiLive)
+            {
+                var errors = PsapiJob.CheckDataset(s.PsapiSpec!, dataset);
+                lines.Add(errors.Count == 0 ? $"✔ {s.Title}: {s.PsapiSpec!.DisplayName} will run locally through the EvalKit PSAPI backend on this exact EvalKit dataset."
+                    : $"✖ {s.Title}: {string.Join(" ", errors)}");
+                continue;
+            }
             if (s.IsProviderSource) { lines.Add($"✔ {s.Title}: a new evaluation will be scored against this exact dataset."); continue; }
             if (s.Run is null) { lines.Add($"• {s.Title}: no run selected."); continue; }
             var mismatch = EvalKitDatasetIdentity.From(s.Run.RunDataset).Mismatches(loaded);
@@ -322,6 +334,17 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         var toRun = new List<PairSideViewModel>();
         foreach (var s in new[] { A, B })
             if (s.IsProviderSource && !(reuse && evaluated.ContainsKey(EvaluationKey(s.Configuration!, full)))) toRun.Add(s);
+        var psapi = toRun.Where(s => s.IsPsapiLive).ToList();
+        toRun = [.. toRun.Except(psapi)];
+        foreach (var s in psapi)
+        {
+            var errors = PsapiJob.CheckDataset(s.PsapiSpec!, full);
+            if (errors.Count > 0) throw new InvalidOperationException($"{s.Title} ({s.PsapiSpec!.DisplayName}): " + string.Join(" ", errors));
+            var status = PsapiBackendStatus.Probe(cli);
+            if (!status.CanRun) throw new InvalidOperationException($"{s.Title} ({s.PsapiSpec!.DisplayName}): {status.Summary}");
+        }
+        if (psapi.Count > 0 && !dialogs.Confirm($"Run {string.Join(" and ", psapi.Select(s => s.PsapiSpec!.DisplayName))} locally on CPU through the EvalKit PSAPI backend on '{full.Name}' v{full.Version} " +
+            $"(all {full.Queries.Count} queries, {full.Documents.Count} documents; the sample limit is applied afterwards)? No network call is made and dataset content stays on this machine. This can take minutes for large corpora.")) return;
         var remote = toRun.Where(s => s.Model!.Properties.GetValueOrDefault("remote_inference") == "true" || providers.Find(s.Model.Identity.ProviderId)?.UsesNetwork == true && s.Model.Execution == ExecutionKind.ExternalProcess).ToList();
         if (remote.Count > 0 && !dialogs.Confirm($"{string.Join(" and ", remote.Select(s => s.Configuration!.Label))} will receive query and document text from '{full.Name}' " +
             $"(classification: {full.DataClassification}). Continue?")) return;
@@ -338,6 +361,8 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
             for (int i = 0; i < toRun.Count; i++)
                 evaluated[EvaluationKey(toRun[i].Configuration!, full)] = (run.Models[i], run.Dataset, depth, run.StartedAt, run.RunId);
         }
+        foreach (var s in psapi)
+            evaluated[EvaluationKey(s.Configuration!, full)] = await RunPsapiAsync(s, full, depth);
 
         PairSide Side(PairSideViewModel s)
         {
@@ -345,10 +370,11 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
             {
                 var e = evaluated[EvaluationKey(s.Configuration!, full)];
                 return new PairSide { Configuration = s.Configuration!, Result = e.Result, RunDataset = e.Dataset, Origin = ResultOrigin.NewEvaluation,
-                    SourceDescription = $"New evaluation by this app (run {e.RunId})", RunId = e.RunId, RunAt = e.At, CachedDepth = e.Depth, Threshold = s.EffectiveThreshold };
+                    SourceDescription = psapiNotes.GetValueOrDefault(EvaluationKey(s.Configuration!, full)) ?? $"New evaluation by this app (run {e.RunId})", RunId = e.RunId, RunAt = e.At, CachedDepth = e.Depth, Threshold = s.EffectiveThreshold };
             }
             var c = s.Run ?? throw new InvalidOperationException($"{s.Title}: select a captured run.");
-            var r = s.LoadCaptured(depth, Token) ?? throw new InvalidOperationException($"{s.Title}: the captured run has no results.");
+            var exact = EvalKitDatasetIdentity.From(c.RunDataset).Mismatches(EvalKitDatasetIdentity.From(full.ToReference())).Count == 0;
+            var r = s.LoadCaptured(depth, Token, exact ? full.Queries.Select(q => q.Id).ToList() : null) ?? throw new InvalidOperationException($"{s.Title}: the captured run has no results.");
             return new PairSide { Configuration = c.Configuration, Result = r, RunDataset = c.RunDataset, Origin = c.Origin, SourceDescription = c.SourceDescription,
                 RunId = c.RunId, RunAt = c.RunAt, CachedDepth = c.CachedDepth, Threshold = s.EffectiveThreshold, Classification = c.Classification };
         }
@@ -360,6 +386,54 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         Status = (toRun.Count > 0 ? $"Invoked {string.Join(", ", toRun.Select(s => s.Title))}; " : "No model invoked; ") +
             $"loaded/compared results. {result?.Recommendation.Headline}";
     }
+
+    /// <summary>
+    /// Live PSAPI evaluation: writes an EvalKit job for the external PSAPI backend, runs it locally (CPU, no network) and loads its output.
+    /// The job, log and outputs are kept under the app data folder for reproducibility.
+    /// </summary>
+    private async Task<(ModelRunResult Result, DatasetReference Dataset, int Depth, DateTimeOffset At, string RunId)> RunPsapiAsync(PairSideViewModel s, EvalDataset full, int depth)
+    {
+        var spec = s.PsapiSpec!;
+        var status = PsapiBackendStatus.Probe(cli);
+        var at = DateTimeOffset.UtcNow;
+        var name = PsapiJob.RunName(spec, full.Name, at);
+        var folder = Path.Combine(AppPaths.Root, "psapi-runs", name);
+        Directory.CreateDirectory(folder);
+        var jobPath = Path.Combine(folder, name + ".job.json");
+        var job = PsapiJob.Build(spec, full.SourcePath!, status.PackageDirectory!, depth, name, PsapiJob.TextSource(spec, full));
+        await File.WriteAllTextAsync(jobPath, job.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }), Token);
+        Status = $"{s.Title}: running {spec.DisplayName} through the EvalKit PSAPI backend (local CPU)...";
+        var output = await cli.RunJobAsync(jobPath, Path.Combine(folder, "output"), new Progress<string>(line => Status = $"{s.Title} · {spec.DisplayName}: {line}"), Token);
+        var metrics = EvalKitFormat.FindMetricsFiles(output);
+        if (metrics.Count != 1) throw new InvalidDataException($"{spec.DisplayName}: expected one EvalKit metrics envelope in the run output, found {metrics.Count}.");
+        var ek = EvalKitFormat.ReadRun(metrics[0], null, full.DataClassification);
+        if (ek.BackendModelId is { } reported && !string.Equals(reported, spec.ModelId, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException($"The backend reported model '{reported}' but '{spec.ModelId}' was requested; the run was discarded.");
+        var loaded = await Task.Run(() => EvalKitFormat.ReadResults(ek, Math.Max(depth, 1000), Token, full.Queries.Select(q => q.Id).ToList()), Token);
+        var result = new ModelRunResult
+        {
+            Model = new ModelIdentity(PsapiProvider.ProviderId, spec.ModelId, s.Configuration!.Revision ?? "package version unknown"),
+            DisplayName = spec.DisplayName,
+            Execution = ExecutionKind.ExternalProcess,
+            Status = loaded.Status,
+            Queries = loaded.Queries,
+            ScoresIncludeRanks = loaded.ScoresIncludeRanks,
+            Warnings = [.. loaded.Warnings],
+            Performance = new PerformanceStats
+            {
+                MeanLatencyMs = loaded.Performance.MeanLatencyMs,
+                Runtime = $"EvalKit {ek.EvalKitVersion ?? "?"} / PSAPI external backend" + (ek.BackendModelVersion is { } mv ? $" (model {mv})" : ""),
+                Device = ek.BackendDevice ?? "cpu",
+                Measured = false
+            }
+        };
+        if (ek.FailedQueryCount > 0) { result.FailedItems = ek.FailedQueryCount; result.Warnings.Add($"EvalKit reported {ek.FailedQueryCount} failed queries (onQueryError=skip)."); }
+        result.Warnings.Add("Latency is EvalKit's whole-run query duration divided by query count (no per-query latencies are recorded), so P50/P95/P99 are unknown.");
+        psapiNotes[EvaluationKey(s.Configuration!, full)] = $"New evaluation: EvalKit job '{name}' on the local PSAPI backend ({ek.BatchMetadata})";
+        log.Write(LogLevel.Info, "psapi", $"PSAPI run {name}: job and outputs saved under the app data folder psapi-runs\\{name}.");
+        return (result, PairSideViewModel.RunDatasetOf(ek), depth, at, ek.RunId);
+    }
+    private readonly Dictionary<string, string> psapiNotes = [];
 
     private void ScheduleRecalculation()
     {
@@ -403,9 +477,9 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
     {
         Headline = Summary = Blocking = Warnings = Strengths = Limitations = "";
         MetricRows = []; PerformanceRows = []; Counts = []; Heatmap = []; Rows = []; CurveMetrics = [];
-        CurvesA = []; CurvesB = []; Radar = null; RadarNote = "";
+        CurvesA = []; CurvesB = []; Radar = null; RadarNote = ""; CompatibilityRows = []; AgreementText = "";
         foreach (var n in new[] { nameof(Headline), nameof(Summary), nameof(Blocking), nameof(Warnings), nameof(Strengths), nameof(Limitations),
-            nameof(MetricRows), nameof(PerformanceRows), nameof(Counts), nameof(Heatmap), nameof(Rows), nameof(CurveMetrics) }) OnPropertyChanged(n);
+            nameof(MetricRows), nameof(PerformanceRows), nameof(Counts), nameof(Heatmap), nameof(Rows), nameof(CurveMetrics), nameof(CompatibilityRows), nameof(AgreementText) }) OnPropertyChanged(n);
     }
 
     private void Present(PairComparisonResult r)
@@ -428,6 +502,22 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         Warnings = r.Warnings.Count == 0 ? "" : string.Join("\n", r.Warnings.Select(x => "⚠ " + x));
         Strengths = $"Model A strengths:\n{Bullets(r.StrengthsA)}\nModel A weaknesses:\n{Bullets(r.WeaknessesA)}\n\nModel B strengths:\n{Bullets(r.StrengthsB)}\nModel B weaknesses:\n{Bullets(r.WeaknessesB)}";
         Limitations = Bullets(r.Limitations);
+        CompatibilityRows = [.. r.Compatibility.Select(c => new PairCompatibilityView(c.Aspect, c.Status switch
+        {
+            CompatibilityStatus.Pass => "✔ Pass", CompatibilityStatus.Note => "ℹ Note", CompatibilityStatus.Warning => "⚠ Warning",
+            CompatibilityStatus.Blocked => "✖ Blocked", _ => "? Unknown"
+        }, c.Detail))];
+        var ag = r.Agreement;
+        AgreementText = ag is null ? "Not applicable (agreement is computed for retrieval comparisons only)." :
+            $"Queries compared: {ag.Queries}\n" +
+            $"Mean top-{r.Settings.K} overlap (Jaccard): {PairComparer.Fmt(ag.MeanTopKOverlap, "0.000")}\n" +
+            $"Mean rank correlation (Spearman ρ): {PairComparer.Fmt(ag.MeanRankCorrelation, "0.000")} over {ag.RankCorrelationQueries} queries\n" +
+            $"Relevant documents retained: A {ag.RelevantA} · B {ag.RelevantB} · both {ag.RelevantBoth}\n" +
+            $"Queries where B missed a relevant document A found: {ag.RelevantMissedByB} · where A missed one B found: {ag.RelevantMissedByA}\n" +
+            $"Raw scores comparable across the two models: {(r.RawScoresComparable ? "yes (same provider and model)" : "NO — different score scales; compare ranks and judgment-based metrics only")}\n" +
+            PairAgreement.Method;
+        relevantQueries = [.. basis?.Dataset.Judgments.Where(j => j.Grade > 0).Select(j => j.QueryId) ?? []];
+        OnPropertyChanged(nameof(CompatibilityRows)); OnPropertyChanged(nameof(AgreementText));
 
         MetricRows = [.. r.Metrics.Select(m =>
         {
@@ -504,6 +594,8 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
             "Model B wins" => r.Outcome == QueryOutcome.BWins,
             "Ties" => r.Outcome == QueryOutcome.Tie,
             "Disagreements" => r.Flags.HasFlag(QueryFlags.Disagreement),
+            "Relevant items missed" => relevantQueries.Contains(r.Id) && (r.A.RelevantRetained == 0 && !r.A.Missing || r.B.RelevantRetained == 0 && !r.B.Missing),
+            "Missing content" => string.IsNullOrEmpty(r.Text) && r.ImagePath is null || r.A.Missing || r.B.Missing,
             "Safety concerns" => r.Flags.HasFlag(QueryFlags.SafetyConcern),
             "Empty results" => r.Flags.HasFlag(QueryFlags.Empty),
             "Errors" => r.Flags.HasFlag(QueryFlags.Error),

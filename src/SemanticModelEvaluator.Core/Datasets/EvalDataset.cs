@@ -34,6 +34,7 @@ public sealed class EvalDataset
     public string ContentHash { get; init; } = "";
     public string? PositiveLabel { get; init; }
     public bool IsSynthetic { get; init; }
+    public DatasetProvenance? Provenance { get; init; }
     public List<QueryItem> Queries { get; init; } = [];
     public List<DocumentItem> Documents { get; init; } = [];
     public List<Judgment> Judgments { get; init; } = [];
@@ -59,7 +60,7 @@ public sealed class EvalDataset
     public DocumentItem? FindDocument(string id) => (docMap ??= Documents.GroupBy(q => q.Id).ToDictionary(g => g.Key, g => g.First())).GetValueOrDefault(id);
     public LabeledExample? FindExample(string id) => (exampleMap ??= Examples.GroupBy(q => q.Id).ToDictionary(g => g.Key, g => g.First())).GetValueOrDefault(id);
 
-    public DatasetReference ToReference() => new(Id, Name, Version, Task, SourcePath, ContentHash);
+    public DatasetReference ToReference() => new(Id, Name, Version, Task, SourcePath, ContentHash) { Provenance = Provenance };
 
     /// <summary>Fraction of queries that have at least one relevance judgment.</summary>
     public double JudgmentCoverage => Queries.Count == 0 ? 0 : (double)Queries.Count(q => JudgmentIndex.HasJudgments(q.Id)) / Queries.Count;
@@ -67,7 +68,10 @@ public sealed class EvalDataset
     public double LabelCoverage => Examples.Count == 0 ? 0 : (double)Examples.Count(e => e.Label is not null || e.GoldScore is not null) / Examples.Count;
 }
 
-public sealed record DatasetReference(string Id, string Name, string Version, EvalTask Task, string? SourcePath, string ContentHash);
+public sealed record DatasetReference(string Id, string Name, string Version, EvalTask Task, string? SourcePath, string ContentHash)
+{
+    public DatasetProvenance? Provenance { get; init; }
+}
 
 public sealed class JudgmentIndex
 {

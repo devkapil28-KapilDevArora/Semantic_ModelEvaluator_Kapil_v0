@@ -21,7 +21,11 @@ public sealed record ModelConfiguration(
     IReadOnlyDictionary<string, string> Parameters,
     string? ContentHash = null)
 {
-    private static readonly string[] ConfigurationProperties = ["queryPrefix", "documentPrefix", "pooling", "onnxFile", "api_style", "deployment", "model_version"];
+    private static readonly string[] ConfigurationProperties = ["queryPrefix", "documentPrefix", "pooling", "onnxFile", "api_style", "deployment", "model_version",
+        "corpus_modality", "query_modality", "dimensions", "max_input_tokens", "normalization", "similarity",
+        // Provenance (PSAPI): which source, commit and invocation path produced the model.
+        "source", "source_commit", "invocation", "api_package", "psapi_build", "psapi_build_id", "psapi_version",
+        "backend_branch", "build_fingerprint", "protocol_version"];
 
     public static ModelConfiguration From(ModelDescriptor d, IReadOnlyDictionary<string, string>? parameters = null)
     {
@@ -36,7 +40,7 @@ public sealed record ModelConfiguration(
     /// <summary>For captured runs (EvalKit/PSAPI or saved workspaces) where only the recorded identity is known.</summary>
     public static ModelConfiguration From(ModelRunResult r, string providerName, IReadOnlyDictionary<string, string>? parameters = null) =>
         new(r.Model.ProviderId, providerName, r.Model.ModelId, string.IsNullOrEmpty(r.DisplayName) ? r.Model.ModelId : r.DisplayName,
-            r.Model.Revision, null, new SortedDictionary<string, string>((parameters ?? new Dictionary<string, string>()).ToDictionary(), StringComparer.Ordinal), r.Model.ContentHash);
+            r.Model.Revision, null, new SortedDictionary<string, string>((parameters ?? r.Provenance).ToDictionary(), StringComparer.Ordinal), r.Model.ContentHash);
 
     [JsonIgnore]
     public string Fingerprint =>
@@ -209,6 +213,34 @@ public sealed class PairRecommendation
     public double? SignTestP { get; init; }
 }
 
+public enum CompatibilityStatus { Pass, Note, Warning, Blocked, Unknown }
+
+/// <summary>One methodological compatibility check shown before any metric (report section "Compatibility assessment").</summary>
+public sealed record CompatibilityCheck(string Aspect, CompatibilityStatus Status, string Detail);
+
+/// <summary>
+/// Rank-based agreement between the two models' top-K lists. Uses only document identities and positions, never raw scores,
+/// so it is valid across providers whose score scales differ. Queries where either side failed or is missing are excluded.
+/// </summary>
+public sealed class PairAgreement
+{
+    public int Queries { get; init; }
+    /// <summary>Mean Jaccard overlap |A∩B| / |A∪B| of the retained top-K document sets.</summary>
+    public double? MeanTopKOverlap { get; init; }
+    /// <summary>Mean Spearman rank correlation over the union of both top-K lists (absent documents get rank K+1). Unknown when fewer than two documents.</summary>
+    public double? MeanRankCorrelation { get; init; }
+    public int RankCorrelationQueries { get; init; }
+    /// <summary>Relevant (grade &gt; 0) documents retained by A, by B, by both.</summary>
+    public int RelevantA { get; init; }
+    public int RelevantB { get; init; }
+    public int RelevantBoth { get; init; }
+    /// <summary>Queries where A retained a relevant document that B missed (and vice versa).</summary>
+    public int RelevantMissedByB { get; init; }
+    public int RelevantMissedByA { get; init; }
+    public const string Method = "Top-K overlap: Jaccard of retained document sets per query, averaged. Rank correlation: Spearman ρ over the union of both top-K lists, " +
+        "documents absent from a list ranked K+1, averaged over queries with ≥ 2 documents in the union. Both use ranks only; raw scores are never compared across models.";
+}
+
 public sealed class PairComparisonResult
 {
     public required PairSide A { get; init; }
@@ -241,6 +273,10 @@ public sealed class PairComparisonResult
     public IReadOnlyList<string> CurveMetricIds { get; init; } = [];
     public string? PrimaryMetricId { get; init; }
     public bool IsRetrieval { get; init; }
+    public List<CompatibilityCheck> Compatibility { get; init; } = [];
+    public PairAgreement? Agreement { get; init; }
+    /// <summary>Raw score scales are only treated as directly comparable for two variants of the same provider and model.</summary>
+    public bool RawScoresComparable { get; init; }
 }
 
 public sealed class PairComparer(MetricRegistry registry)
@@ -257,7 +293,7 @@ public sealed class PairComparer(MetricRegistry registry)
         "Warnings (not blocking): K beyond a run's cached depth, different execution kinds (measured vs recorded latency), synthetic baselines, partial failures, low judgment coverage."
     ];
 
-    private static readonly string[] PrimaryRetrieval = ["ndcg_at_k", "recall_at_k", "mrr", "precision_at_k", "hit_rate_at_k"];
+    private static readonly string[] PrimaryRetrieval = ["ndcg_at_k", "recall_at_k", "mrr", "map_at_k", "precision_at_k", "hit_rate_at_k"];
     private static readonly string[] PrimaryClassification = ["f1", "macro_f1", "accuracy", "roc_auc", "pr_auc"];
 
     public static bool IsRetrievalTask(EvalTask t) => t is EvalTask.Retrieval or EvalTask.ImageTextRetrieval or EvalTask.Reranking;
@@ -285,6 +321,7 @@ public sealed class PairComparer(MetricRegistry registry)
         {
             Id = ds.Id, Name = ds.Name, Version = ds.Version, Task = ds.Task, Description = ds.Description, DataClassification = ds.DataClassification,
             SourcePath = ds.SourcePath, ContentHash = ds.ContentHash, PositiveLabel = ds.PositiveLabel, IsSynthetic = ds.IsSynthetic,
+            Provenance = ds.Provenance,
             Queries = retrieval ? [.. ds.Queries.Where(q => ids.Contains(q.Id))] : [],
             Documents = ds.Documents,
             Judgments = retrieval ? [.. ds.Judgments.Where(j => ids.Contains(j.QueryId))] : [],
@@ -295,6 +332,7 @@ public sealed class PairComparer(MetricRegistry registry)
 
     public static (List<string> Blocking, List<string> Warnings) CheckEligibility(EvalDataset dataset, PairSide a, PairSide b, int k)
     {
+        DatasetPolicy.Ensure(dataset, DatasetOperation.Evaluate);
         var blocking = new List<string>();
         var warnings = new List<string>();
         if (!IsRetrievalTask(dataset.Task) && dataset.Task is not (EvalTask.Classification or EvalTask.Safety))
@@ -366,7 +404,10 @@ public sealed class PairComparer(MetricRegistry registry)
 
         var countsA = Counts(dataset, ctxA, rows, true, retrieval);
         var countsB = Counts(dataset, ctxB, rows, false, retrieval);
-        var perf = Performance(a, b, countsA, countsB);
+        var perf = Performance(a, b, countsA, countsB, rows);
+        var rawComparable = RawScoresComparable(a.Configuration, b.Configuration);
+        var agreement = retrieval ? Agree(dataset, rows, settings.K) : null;
+        var compatibility = AssessCompatibility(dataset, a, b, settings, rows, blocking, rawComparable);
 
         var primary = (retrieval ? PrimaryRetrieval : PrimaryClassification).FirstOrDefault(id => metrics.Any(m => m.Definition.Id == id && m.A?.Value is not null && m.B?.Value is not null));
         var limitations = Limitations(dataset, a, b, countsA, countsB, rows, settings, retrieval);
@@ -374,6 +415,9 @@ public sealed class PairComparer(MetricRegistry registry)
             limitations.Insert(0, $"Inclusion rule: judged items only — {(retrieval ? dataset.Queries.Count : dataset.Examples.Count)} of {fullItemCount} item(s) included; unjudged items were excluded, not scored.");
         if (settings.Dimensions is { } dims)
             limitations.Add("Evaluation dimensions limited to: " + string.Join(", ", dims.Order()) + ". Other metric categories were not reported.");
+        if (!rawComparable)
+            limitations.Add("Raw scores are on different, uncalibrated scales (different providers or models), so they are never compared directly: metrics use ranks and judgments, " +
+                "and each side's threshold is set on its own scale. No score calibration was applied.");
         var recommendation = Recommend(a, b, metrics, rows, primary, blocking, warnings, countsA, countsB);
 
         var sa = new List<string>(); var wa = new List<string>(); var sb = new List<string>(); var wb = new List<string>();
@@ -412,8 +456,90 @@ public sealed class PairComparer(MetricRegistry registry)
             A = a, B = b, Dataset = dataset.ToReference(), DatasetClassification = dataset.DataClassification, Settings = settings,
             Blocking = blocking, Warnings = warnings, Metrics = metrics, Performance = perf, CountsA = countsA, CountsB = countsB, Rows = rows,
             Recommendation = recommendation, StrengthsA = sa, WeaknessesA = wa, StrengthsB = sb, WeaknessesB = wb, Limitations = limitations,
-            CurveA = curveA, CurveB = curveB, CurveMetricIds = curveIds, PrimaryMetricId = primary, IsRetrieval = retrieval
+            CurveA = curveA, CurveB = curveB, CurveMetricIds = curveIds, PrimaryMetricId = primary, IsRetrieval = retrieval,
+            Compatibility = compatibility, Agreement = agreement, RawScoresComparable = rawComparable
         };
+    }
+
+    /// <summary>Same provider and model id (a revision, deployment or parameter variant): raw scores share a scale. Anything else does not.</summary>
+    public static bool RawScoresComparable(ModelConfiguration a, ModelConfiguration b) =>
+        string.Equals(a.ProviderId, b.ProviderId, StringComparison.OrdinalIgnoreCase) && string.Equals(a.ModelId, b.ModelId, StringComparison.OrdinalIgnoreCase);
+
+    private static PairAgreement Agree(EvalDataset ds, List<PairQueryRow> rows, int k)
+    {
+        var overlaps = new List<double>(); var rhos = new List<double>();
+        int relA = 0, relB = 0, relBoth = 0, missedByB = 0, missedByA = 0;
+        foreach (var r in rows)
+        {
+            if (r.A.Missing || r.A.Error is not null || r.B.Missing || r.B.Error is not null) continue;
+            var la = r.A.Retained.Take(k).Select(d => d.DocumentId).ToList();
+            var lb = r.B.Retained.Take(k).Select(d => d.DocumentId).ToList();
+            var sa = la.ToHashSet(StringComparer.Ordinal); var sb = lb.ToHashSet(StringComparer.Ordinal);
+            var union = sa.Union(sb, StringComparer.Ordinal).ToList();
+            overlaps.Add(union.Count == 0 ? 1 : (double)sa.Intersect(sb, StringComparer.Ordinal).Count() / union.Count);
+            if (union.Count >= 2)
+            {
+                double Rank(List<string> list, string id) { var i = list.IndexOf(id); return i < 0 ? k + 1 : i + 1; }
+                var x = union.Select(id => Rank(la, id)).ToArray(); var y = union.Select(id => Rank(lb, id)).ToArray();
+                if (BuiltInMetrics.Pearson(x, y) is { } rho) rhos.Add(rho);
+            }
+            bool Rel(string id) => ds.JudgmentIndex.Get(r.Id, id)?.Grade > 0;
+            var ra = sa.Where(Rel).ToHashSet(StringComparer.Ordinal); var rb = sb.Where(Rel).ToHashSet(StringComparer.Ordinal);
+            relA += ra.Count; relB += rb.Count; relBoth += ra.Count(rb.Contains);
+            if (ra.Any(d => !rb.Contains(d))) missedByB++;
+            if (rb.Any(d => !ra.Contains(d))) missedByA++;
+        }
+        return new PairAgreement
+        {
+            Queries = overlaps.Count, MeanTopKOverlap = overlaps.Count == 0 ? null : overlaps.Average(),
+            MeanRankCorrelation = rhos.Count == 0 ? null : rhos.Average(), RankCorrelationQueries = rhos.Count,
+            RelevantA = relA, RelevantB = relB, RelevantBoth = relBoth, RelevantMissedByA = missedByA, RelevantMissedByB = missedByB
+        };
+    }
+
+    private static List<CompatibilityCheck> AssessCompatibility(EvalDataset ds, PairSide a, PairSide b, PairSettings s, List<PairQueryRow> rows,
+        List<string> blocking, bool rawComparable)
+    {
+        var checks = new List<CompatibilityCheck>();
+        var loaded = EvalKitDatasetIdentity.From(ds.ToReference());
+        var idIssues = new[] { ("A", a), ("B", b) }.SelectMany(x => EvalKitDatasetIdentity.From(x.Item2.RunDataset).Mismatches(loaded).Select(m => $"Model {x.Item1}: {m}")).ToList();
+        checks.Add(new("Same dataset and exact version", idIssues.Count == 0 ? CompatibilityStatus.Pass : CompatibilityStatus.Blocked,
+            idIssues.Count == 0 ? $"Both runs match {ds.Name} v{ds.Version} (payload hash {ds.ContentHash})." : string.Join(" ", idIssues)));
+        var taskOk = a.RunDataset.Task == ds.Task && b.RunDataset.Task == ds.Task;
+        checks.Add(new("Same task", taskOk ? CompatibilityStatus.Pass : CompatibilityStatus.Blocked, $"Dataset task {ds.Task}; A {a.RunDataset.Task}; B {b.RunDataset.Task}."));
+        checks.Add(new("Distinct configurations", a.Configuration.Fingerprint == b.Configuration.Fingerprint ? CompatibilityStatus.Blocked : CompatibilityStatus.Pass,
+            a.Configuration.Fingerprint == b.Configuration.Fingerprint ? "Identical configuration fingerprints." : "Fingerprints differ (model, version, endpoint or parameters)."));
+        int onlyA = rows.Count(r => !r.A.Missing && r.B.Missing), onlyB = rows.Count(r => r.A.Missing && !r.B.Missing), neither = rows.Count(r => r.A.Missing && r.B.Missing);
+        checks.Add(new("Same query set", onlyA + onlyB == 0 ? CompatibilityStatus.Pass : CompatibilityStatus.Warning,
+            onlyA + onlyB == 0 ? $"Both runs cover the same {rows.Count - neither} of {rows.Count} item(s) in scope."
+                : $"{onlyA} item(s) only in A's run, {onlyB} only in B's run; missing items are reported, never scored as zero."));
+        checks.Add(new("Same judgments and inclusion rules", CompatibilityStatus.Pass,
+            "Both sides are scored by this application against the loaded dataset's judgments with the same K, sample and inclusion rule " +
+            $"({(s.JudgedItemsOnly ? "judged items only" : "all items; unjudged reported as unknown")})."));
+        checks.Add(a.CachedDepth is { } da && b.CachedDepth is { } db
+            ? new("Same candidate limit", da == db ? CompatibilityStatus.Pass : CompatibilityStatus.Warning,
+                da == db ? $"Both runs cached {da} results per query." : $"A cached {da}, B cached {db} results per query; K={s.K} is evaluated on both" + (s.K > Math.Min(da, db) ? " but exceeds the smaller depth." : "."))
+            : new("Same candidate limit", CompatibilityStatus.Unknown, $"Cached depth A {a.CachedDepth?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unknown"}, B {b.CachedDepth?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unknown"}."));
+        string? P(ModelConfiguration c, string key) => c.Parameters.TryGetValue(key, out var v) && !string.IsNullOrEmpty(v) ? v : null;
+        var ma = P(a.Configuration, "corpus_modality"); var mb = P(b.Configuration, "corpus_modality");
+        checks.Add(ma is null || mb is null
+            ? new("Modality", CompatibilityStatus.Unknown, $"Corpus modality A {ma ?? "not recorded"}, B {mb ?? "not recorded"}; dataset has images: {(ds.HasImages ? "yes" : "no")}.")
+            : new("Modality", ma == mb ? CompatibilityStatus.Pass : CompatibilityStatus.Warning,
+                ma == mb ? $"Both models index a {ma} corpus." : $"A indexes {ma}, B indexes {mb}: the models did not see the same candidate representation."));
+        checks.Add(new("Score scale and direction", rawComparable ? CompatibilityStatus.Pass : CompatibilityStatus.Note,
+            rawComparable ? "Same provider and model: raw scores share a scale (higher = more similar)."
+                : "Different providers or models: raw scores are not on a shared, calibrated scale. Rank- and judgment-based metrics are compared; thresholds are per side; no calibration applied."));
+        var dimA = P(a.Configuration, "dimensions"); var dimB = P(b.Configuration, "dimensions");
+        checks.Add(new("Embedding dimensions", CompatibilityStatus.Note,
+            $"A {dimA ?? "unknown"}, B {dimB ?? "unknown"}. Each model ranks the corpus with its own embeddings, so equal dimensions are not required; vectors are never mixed across models."));
+        var truncA = P(a.Configuration, "max_input_tokens"); var truncB = P(b.Configuration, "max_input_tokens");
+        checks.Add(new("Truncation / input limit", truncA is null || truncB is null ? CompatibilityStatus.Unknown : truncA == truncB ? CompatibilityStatus.Pass : CompatibilityStatus.Note,
+            $"Maximum input tokens A {truncA ?? "unknown"}, B {truncB ?? "unknown"}. Longer inputs are truncated by each model's own tokenizer; differences are intentional model properties."));
+        checks.Add(new("Latency basis", a.Result.Performance.Measured == b.Result.Performance.Measured ? CompatibilityStatus.Pass : CompatibilityStatus.Warning,
+            $"A {(a.Result.Performance.Measured ? "measured by this application" : "recorded by another tool or unavailable")}; B {(b.Result.Performance.Measured ? "measured by this application" : "recorded by another tool or unavailable")}."));
+        if (blocking.Count > 0 && checks.All(c => c.Status != CompatibilityStatus.Blocked))
+            checks.Add(new("Other eligibility rules", CompatibilityStatus.Blocked, string.Join(" ", blocking)));
+        return checks;
     }
 
     public static string? Better(Direction direction, double? a, double? b)
@@ -535,16 +661,31 @@ public sealed class PairComparer(MetricRegistry registry)
         };
     }
 
-    private static List<PerformanceRow> Performance(PairSide a, PairSide b, SideCounts ca, SideCounts cb)
+    /// <summary>Nearest-rank percentile; null when there are too few samples for the percentile to be meaningful.</summary>
+    public static double? Percentile(IReadOnlyList<double> values, double p, int minimumSamples)
+    {
+        if (values.Count < minimumSamples || values.Count == 0) return null;
+        var sorted = values.Order().ToArray();
+        var rank = (int)Math.Ceiling(p / 100.0 * sorted.Length);
+        return sorted[Math.Clamp(rank - 1, 0, sorted.Length - 1)];
+    }
+
+    private static List<PerformanceRow> Performance(PairSide a, PairSide b, SideCounts ca, SideCounts cb, List<PairQueryRow> rows)
     {
         static string Basis(PairSide s) => s.Result.Performance.Measured ? "measured" : "recorded/imported";
         var basis = $"A {Basis(a)}, B {Basis(b)}";
         var pa = a.Result.Performance; var pb = b.Result.Performance;
         var ua = pa.Usage; var ub = pb.Usage;
-        var rows = new List<PerformanceRow>
+        var la = rows.Where(r => !r.A.Missing && r.A.LatencyMs is > 0).Select(r => r.A.LatencyMs!.Value).ToList();
+        var lb = rows.Where(r => !r.B.Missing && r.B.LatencyMs is > 0).Select(r => r.B.LatencyMs!.Value).ToList();
+        string Pct(int min) => $"per-item latency, nearest rank; needs ≥ {min} items per side (A {la.Count}, B {lb.Count}); {basis}";
+        var rows2 = new List<PerformanceRow>
         {
             new("Mean latency (ms)", pa.MeanLatencyMs, pb.MeanLatencyMs, Direction.LowerIsBetter, "0.0", basis),
-            new("P95 latency (ms)", pa.P95LatencyMs, pb.P95LatencyMs, Direction.LowerIsBetter, "0.0", basis),
+            new("P50 latency (ms)", Percentile(la, 50, 5), Percentile(lb, 50, 5), Direction.LowerIsBetter, "0.0", Pct(5)),
+            new("P95 latency (ms)", Percentile(la, 95, 20) ?? (la.Count == 0 ? pa.P95LatencyMs : null), Percentile(lb, 95, 20) ?? (lb.Count == 0 ? pb.P95LatencyMs : null),
+                Direction.LowerIsBetter, "0.0", Pct(20) + " (run-level P95 used when no per-item latency was recorded)"),
+            new("P99 latency (ms)", Percentile(la, 99, 100), Percentile(lb, 99, 100), Direction.LowerIsBetter, "0.0", Pct(100)),
             new("Error rate", ca.Total == 0 ? null : (double)ca.Failed / ca.Total, cb.Total == 0 ? null : (double)cb.Failed / cb.Total, Direction.LowerIsBetter, "0.000", "failed or missing items / items"),
             new("Requests", ua?.Requests, ub?.Requests, Direction.Neutral, "0", "provider-reported"),
             new("Input tokens", ua?.InputTokens, ub?.InputTokens, Direction.Neutral, "0", "provider-reported"),
@@ -552,7 +693,7 @@ public sealed class PairComparer(MetricRegistry registry)
             new("Transient retries", ua?.Retries, ub?.Retries, Direction.LowerIsBetter, "0", "provider-reported"),
             new("Estimated cost", ua?.EstimatedCost, ub?.EstimatedCost, Direction.LowerIsBetter, "0.0000", "only from explicitly configured prices")
         };
-        return rows;
+        return rows2;
     }
 
     private static List<string> Limitations(EvalDataset ds, PairSide a, PairSide b, SideCounts ca, SideCounts cb, List<PairQueryRow> rows, PairSettings s, bool retrieval)

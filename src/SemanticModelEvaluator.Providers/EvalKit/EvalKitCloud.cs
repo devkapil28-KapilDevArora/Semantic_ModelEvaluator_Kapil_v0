@@ -6,6 +6,7 @@ using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
 using SemanticModelEvaluator.Core;
 using SemanticModelEvaluator.Core.EvalKit;
+using SemanticModelEvaluator.Core.Datasets;
 using SemanticModelEvaluator.Core.Persistence;
 using SemanticModelEvaluator.Core.Providers;
 using SemanticModelEvaluator.Core.Security;
@@ -294,21 +295,34 @@ public sealed record EvalKitDatasetContainer(string Name, bool Working, bool Sen
 /// (EvalKit.Viewer DatasetFetcher.cs). The CLI must be built from an authorized ASG-SearchPlatform checkout
 /// (<c>dotnet build EvalKit/src/EvalKit.CLI</c>); it authenticates with the user's own sign-in.
 /// </summary>
-public sealed class EvalKitCli(SettingsStore settings)
+public sealed class EvalKitCli(SettingsStore settings, NetworkPolicy? network = null)
 {
+    public string DatasetCacheFor(EvalKitDatasetContainer? container) =>
+        Path.Combine(settings.Current.EvalKit.DatasetCacheDirectory ?? Path.Combine(AppPaths.Root, "datasets", "internal"),
+            container?.Sensitive == true ? "sensitive" : "non-sensitive");
+
     public string? Locate()
     {
         var e = settings.Current.EvalKit;
         if (!string.IsNullOrWhiteSpace(e.CliPath)) return File.Exists(e.CliPath) ? e.CliPath : null;
         var roots = new[] { e.RepositoryRoot, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "source", "ASG-SearchPlatform"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "source", "repos", "ASG-SearchPlatform") };
-        foreach (var root in roots.Where(r => !string.IsNullOrWhiteSpace(r)))
-        {
-            var bin = Path.Combine(root!, "EvalKit", "bin", "EvalKit.CLI");
-            if (!Directory.Exists(bin)) continue;
-            var dll = Directory.EnumerateFiles(bin, "EvalKit.CLI.dll", SearchOption.AllDirectories).OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
-            if (dll is not null) return dll;
-        }
+        // The repository's Directory.Build.props writes outputs to <root>\bin\<Project>; older layouts used EvalKit\bin.
+        var dll = roots.Where(r => !string.IsNullOrWhiteSpace(r))
+            .SelectMany(r => new[] { Path.Combine(r!, "bin", "EvalKit.CLI"), Path.Combine(r!, "EvalKit", "bin", "EvalKit.CLI") })
+            .Where(Directory.Exists)
+            .SelectMany(b => Directory.EnumerateFiles(b, "EvalKit.CLI.dll", SearchOption.AllDirectories))
+            .OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
+        return dll;
+    }
+
+    /// <summary>The ASG-SearchPlatform checkout that contains the located CLI (EvalKit resolves backend packages relative to it).</summary>
+    public string? LocateRepositoryRoot()
+    {
+        var configured = settings.Current.EvalKit.RepositoryRoot;
+        if (!string.IsNullOrWhiteSpace(configured) && Directory.Exists(Path.Combine(configured, "EvalKit"))) return configured;
+        for (var dir = Locate() is { } cli ? Path.GetDirectoryName(cli) : null; dir is not null; dir = Path.GetDirectoryName(dir))
+            if (Directory.Exists(Path.Combine(dir, "EvalKit")) && Directory.Exists(Path.Combine(dir, "ExternalBackends"))) return dir;
         return null;
     }
 
@@ -327,8 +341,46 @@ public sealed class EvalKitCli(SettingsStore settings)
         ? new Dictionary<string, string> { ["EVALKIT_HEADLESS"] = "1" }
         : new Dictionary<string, string> { ["EVALKIT_HEADLESS"] = "1", ["EVALKIT_BLOB_PREFIX"] = container.BlobPrefix };
 
-    public async Task<string> FetchDatasetAsync(EvalKitDatasetIdentity id, EvalKitDatasetContainer? container, IProgress<string>? progress, CancellationToken ct)
+    public Task<string> FetchDatasetAsync(EvalKitDatasetIdentity id, EvalKitDatasetContainer? container, IProgress<string>? progress, CancellationToken ct) =>
+        FetchCoreAsync(id, container, false, progress, ct);
+
+    public Task<string> FetchCatalogDatasetAsync(EvalKitDatasetEntry entry, IProgress<string>? progress, CancellationToken ct) =>
+        FetchCoreAsync(new(entry.Name, entry.Version, null), entry.Container, true, progress, ct);
+
+    public static IReadOnlyList<string> CatalogFetchArguments(EvalKitDatasetEntry entry, string account)
     {
+        if (string.IsNullOrWhiteSpace(entry.Name) || string.IsNullOrWhiteSpace(entry.Version) || string.IsNullOrWhiteSpace(account))
+            throw new InvalidOperationException("Select an exact catalog name, version and storage account.");
+        return ["cache", "fetch", "--dataset", entry.Name, "--version", EvalKitDatasetIdentity.NormalizeVersion(entry.Version)!,
+            "--storage-account", account, "--container", entry.Container.Name];
+    }
+
+    internal static string ValidateFetchedManifest(string output, string cacheRoot, EvalKitDatasetIdentity expected)
+    {
+        var lines = output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Length != 1 || !Path.IsPathFullyQualified(lines[0]))
+            throw new InvalidDataException("EvalKit cache fetch must return exactly one absolute manifest path.");
+        var path = Path.GetFullPath(lines[0]);
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(cacheRoot)) + Path.DirectorySeparatorChar;
+        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+            throw new InvalidDataException("EvalKit returned a manifest outside the selected cache, or the manifest does not exist.");
+        var manifest = JsonNode.Parse(File.ReadAllText(path)) ?? throw new InvalidDataException("Empty EvalKit manifest.");
+        var description = manifest["description"];
+        if (description?["name"]?.GetValue<string>() != expected.Name ||
+            EvalKitDatasetIdentity.NormalizeVersion(description?["version"]?.GetValue<string>()) != EvalKitDatasetIdentity.NormalizeVersion(expected.Version))
+            throw new InvalidDataException("Fetched dataset name/version differs from the selected catalog entry.");
+        var hash = manifest["payload_hash"]?.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(hash) || (expected.PayloadHash is not null && hash != expected.PayloadHash))
+            throw new InvalidDataException("Fetched dataset payload hash is missing or does not match the saved run.");
+        return path;
+    }
+
+    private async Task<string> FetchCoreAsync(EvalKitDatasetIdentity id, EvalKitDatasetContainer? container, bool newEvaluation,
+        IProgress<string>? progress, CancellationToken ct)
+    {
+        if (network?.OfflineMode == true || settings.Current.OfflineMode)
+            throw new InvalidOperationException("Offline mode is on; use an exact already-cached dataset.");
+        DatasetPolicy.Ensure(DatasetPolicy.EvalKit(id.Name ?? "", container?.Classification ?? "Unclassified EvalKit dataset"), DatasetOperation.Preview);
         var cli = Locate() ?? throw new FileNotFoundException("EvalKit CLI not found. Build it from your authorized checkout with 'dotnet build EvalKit/src/EvalKit.CLI', " +
             "or set its path under EvalKit settings.");
         var psi = new ProcessStartInfo
@@ -337,16 +389,20 @@ public sealed class EvalKitCli(SettingsStore settings)
             RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true
         };
         if (psi.FileName == "dotnet") psi.ArgumentList.Add(cli);
-        foreach (var a in FetchArguments(id, container is null ? null : (settings.Current.EvalKit.DatasetAccount ?? ""), container?.Name)) psi.ArgumentList.Add(a);
+        var arguments = newEvaluation
+            ? CatalogFetchArguments(new(id.Name!, id.Version!, "", container!), settings.Current.EvalKit.DatasetAccount)
+            : FetchArguments(id, container is null ? null : (settings.Current.EvalKit.DatasetAccount ?? ""), container?.Name);
+        foreach (var a in arguments) psi.ArgumentList.Add(a);
         foreach (var (k, v) in FetchEnvironment(container)) psi.Environment[k] = v;
-        if (!string.IsNullOrWhiteSpace(settings.Current.EvalKit.DatasetCacheDirectory)) psi.Environment["EVALKIT_CACHE_DIR"] = settings.Current.EvalKit.DatasetCacheDirectory;
+        psi.Environment["EVALKIT_CACHE_DIR"] = DatasetCacheFor(container);
         progress?.Report($"Running EvalKit CLI cache fetch for {id.Name} v{id.Version}{(container is null ? " (EvalKit default store)" : " from " + container)}...");
         using var p = Process.Start(psi) ?? throw new InvalidOperationException("Could not start the EvalKit CLI.");
         var stdout = p.StandardOutput.ReadToEndAsync(ct);
         var stderr = p.StandardError.ReadToEndAsync(ct);
         try { await p.WaitForExitAsync(ct).ConfigureAwait(false); }
         catch (OperationCanceledException) { try { p.Kill(true); } catch (InvalidOperationException) { } throw; }
-        var err = await stderr.ConfigureAwait(false); await stdout.ConfigureAwait(false);
+        var err = await stderr.ConfigureAwait(false);
+        var output = await stdout.ConfigureAwait(false);
         if (p.ExitCode != 0)
         {
             var tail = string.Join(" ", err.Split('\n', StringSplitOptions.RemoveEmptyEntries).TakeLast(3));
@@ -354,7 +410,71 @@ public sealed class EvalKitCli(SettingsStore settings)
             var message = $"EvalKit CLI exited with code {p.ExitCode}: {Redactor.Redact(tail)}";
             throw access ? new AccessDeniedException(message) : new InvalidOperationException(message);
         }
-        return EvalKitFormat.FindCachedDataset(id, settings.Current.EvalKit.DatasetCacheDirectory)
-            ?? throw new FileNotFoundException("The CLI finished but the exact dataset (name, version, payload hash) was not found in the EvalKit cache.");
+        var manifest = newEvaluation
+            ? ValidateFetchedManifest(output, DatasetCacheFor(container), id)
+            : EvalKitFormat.FindCachedDataset(id, DatasetCacheFor(container))
+                ?? throw new FileNotFoundException("The CLI finished but the exact dataset (name, version, payload hash) was not found in the selected EvalKit cache.");
+        AtomicFile.WriteAllText(manifest + ".smeval-handling.json", new JsonObject
+        {
+            ["classification"] = container?.Classification ?? "Unclassified EvalKit dataset",
+            ["source"] = "MicrosoftInternal"
+        }.ToJsonString());
+        return manifest;
+    }
+
+    /// <summary>Arguments for <c>evalkit run &lt;job&gt; --output-dir DIR --force</c>.</summary>
+    public static IReadOnlyList<string> RunArguments(string jobPath, string outputDirectory) =>
+        ["run", Path.GetFullPath(jobPath), "--output-dir", Path.GetFullPath(outputDirectory), "--force"];
+
+    /// <summary>
+    /// Runs an EvalKit job headless from the repository root (EvalKit resolves repo-relative resources from there).
+    /// Progress lines are redacted. On cancellation the process tree is killed. Returns the output directory.
+    /// </summary>
+    public async Task<string> RunJobAsync(string jobPath, string outputDirectory, IProgress<string>? progress, CancellationToken ct)
+    {
+        var cli = Locate() ?? throw new FileNotFoundException("EvalKit CLI not found. Build it from your authorized checkout with 'dotnet build EvalKit/src/EvalKit.CLI -c Release', " +
+            "or set its path under EvalKit settings.");
+        var root = LocateRepositoryRoot() ?? throw new DirectoryNotFoundException("The ASG-SearchPlatform checkout containing the EvalKit CLI was not found; set the repository root under EvalKit settings.");
+        Directory.CreateDirectory(outputDirectory);
+        var psi = new ProcessStartInfo
+        {
+            FileName = cli.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : cli,
+            WorkingDirectory = root,
+            RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true
+        };
+        if (psi.FileName == "dotnet") psi.ArgumentList.Add(cli);
+        foreach (var a in RunArguments(jobPath, outputDirectory)) psi.ArgumentList.Add(a);
+        psi.Environment["EVALKIT_HEADLESS"] = "1";
+        if (!string.IsNullOrWhiteSpace(settings.Current.EvalKit.DatasetCacheDirectory)) psi.Environment["EVALKIT_CACHE_DIR"] = settings.Current.EvalKit.DatasetCacheDirectory;
+        using var p = Process.Start(psi) ?? throw new InvalidOperationException("Could not start the EvalKit CLI.");
+        var errLines = new List<string>();
+        var outTail = new List<string>();
+        var stderr = Task.Run(async () =>
+        {
+            while (await p.StandardError.ReadLineAsync(ct).ConfigureAwait(false) is { } line)
+                lock (errLines) { errLines.Add(line); if (errLines.Count > 50) errLines.RemoveAt(0); }
+        }, ct);
+        var stdout = Task.Run(async () =>
+        {
+            while (await p.StandardOutput.ReadLineAsync(ct).ConfigureAwait(false) is { } line)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                lock (outTail) { outTail.Add(line.Trim()); if (outTail.Count > 50) outTail.RemoveAt(0); }
+                progress?.Report(Redactor.Redact(line.Trim()));
+            }
+        }, ct);
+        try { await p.WaitForExitAsync(ct).ConfigureAwait(false); await Task.WhenAll(stdout, stderr).ConfigureAwait(false); }
+        catch (OperationCanceledException) { try { p.Kill(true); } catch (InvalidOperationException) { } throw; }
+        if (p.ExitCode != 0)
+        {
+            List<string> all;
+            lock (errLines) lock (outTail) all = [.. outTail, .. errLines];
+            // Informational log lines bury the cause; prefer lines that report a failure.
+            var failures = all.Where(l => l.Contains("error", StringComparison.OrdinalIgnoreCase) || l.Contains("fail", StringComparison.OrdinalIgnoreCase)
+                || l.Contains("exception", StringComparison.OrdinalIgnoreCase)).TakeLast(4).ToList();
+            var tail = string.Join(" ", failures.Count > 0 ? failures : all.TakeLast(4));
+            throw new InvalidOperationException($"EvalKit run exited with code {p.ExitCode}: {Redactor.Redact(tail)}");
+        }
+        return outputDirectory;
     }
 }

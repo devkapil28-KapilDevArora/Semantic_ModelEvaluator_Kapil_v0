@@ -40,9 +40,17 @@ Each side (Model A, Model B) independently uses one source:
 | Cached EvalKit bundle | Re-verifies size + sha256 of every file, then reads | No |
 | Saved run of this app | Reuses persisted scores | No |
 
-PSAPI models are discovered from captured, verified EvalKit bundles. Selecting one loads its captured
-results; **live PSAPI invocation is blocked** because no PSAPI endpoint or authentication contract is
-documented in the workspace (see Limitations).
+PSAPI models (Genoa, Florence, Palermo, Space v6) run **live and locally** as an EvalKit job. The app
+starts the EvalKit CLI, which starts the `EvalKit.Backend.Psapi` external backend from
+ASG-SearchPlatform `develop`. That backend runs on CPU from local packages, with no endpoint and no
+runtime credential. Each side shows whether the backend is ready, and if it is not, the exact build
+step that is missing. Text models (Space v6, Palermo) need a text dataset; image models (Florence,
+Genoa) need an EvalKit image dataset. A dataset with the wrong modality is blocked before the run.
+Captured PSAPI runs in verified EvalKit bundles also load. Contract evidence, limits and open
+questions are in [docs/PSAPI_DISCOVERY.md](docs/PSAPI_DISCOVERY.md).
+
+The Hugging Face selector lists only semantic-search embedding models (retrieval and embedding
+output; never generative, classification or reranking models).
 
 Comparison eligibility (shown in the UI and the report): both sides must reference the same dataset
 name, exact version and payload hash; otherwise the comparison is blocked with the reason. Identical
@@ -52,7 +60,12 @@ scales differ) and only **recalculate** metrics from captured scores; runs whose
 positions only are labelled as rank cut-offs.
 
 **Download detailed HTML** writes one self-contained file (no CDN, CSP-restricted, encoded content,
-redacted secrets, 21 sections). For sensitive or unclassified data, per-item content requires explicit
+redacted secrets, **28 numbered, collapsible sections** with a table of contents, sortable tables,
+expand/collapse all, and report schema version 2.0). Endpoint values are never exported. Metrics
+include Recall/Precision/NDCG/MRR/**MAP@K**, hit and empty rates, rank-only agreement between the
+two models (top-K overlap and Spearman rank correlation), and P50/P95/P99 latency when there are
+enough samples (otherwise unknown). A compatibility table covers dataset identity, modality, score
+scale, dimensions and truncation. For sensitive or unclassified data, per-item content requires explicit
 confirmation; otherwise the report contains aggregate counts only (no item IDs or scores), and any
 known query/document identifier inside free-form warnings is masked as `[item]`. Model parameters
 whose names look like credentials (`*key`, `*secret`, `*token`, `password`, connection strings) are
@@ -168,6 +181,14 @@ $env:SMEVAL_VERIFY_NETWORK = '1'
 dotnet test tests\SemanticModelEvaluator.Tests\SemanticModelEvaluator.Tests.csproj --filter FullyQualifiedName~NativeVerificationTests
 ```
 
+Optional live PSAPI verification runs Space v6 through a locally built EvalKit CLI and PSAPI backend
+(CPU only, no network):
+
+```powershell
+$env:SMEVAL_VERIFY_PSAPI = '1'
+dotnet test tests\SemanticModelEvaluator.Tests\SemanticModelEvaluator.Tests.csproj --filter FullyQualifiedName~PsapiLiveVerificationTests
+```
+
 The UI smoke script launches its own process with isolated `--data-root` storage under `artifacts`,
 exercises the demo workflow and stops only that process. Native verification writes its
 workbook and JSON summary to `artifacts\native-verification`.
@@ -183,7 +204,7 @@ Limitation status:
 | Item | Category | Status |
 |---|---|---|
 | Live Microsoft AI Foundry embeddings | Implemented but not validated — blocked by missing credentials | Fake-endpoint tested (auth, retry, usage, errors) |
-| PSAPI live invocation | Blocked by an undocumented provider contract | Captured EvalKit/PSAPI runs are fully supported; no endpoint is invented |
+| PSAPI live invocation | Implemented and validated (Space v6, local CPU via the EvalKit CLI) | Florence/Genoa need an EvalKit image dataset and Palermo uses an experimental package; these were not run live here. The owner and reuse terms are open questions (see docs/PSAPI_DISCOVERY.md). |
 | EvalKit cloud listing/download | Implemented but not validated — blocked by missing access | In-memory container tested, incl. sensitive denial without fallback |
 | EvalKit CLI dataset fetch (published/working containers) | Implemented but not validated — blocked by missing access / CLI build | Arguments, environment and no-fallback rules unit tested |
 | *EvalKit Threshold Explorer – First-Time Setup Guide.docx* | Blocked by missing access (document not available) | Contracts derived from the authorized local ASG-SearchPlatform checkout |

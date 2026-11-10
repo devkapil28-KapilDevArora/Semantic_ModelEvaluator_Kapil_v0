@@ -101,7 +101,7 @@ public sealed class WorkbenchViewModel : ObservableObject, IDisposable
         RefreshCommand = Command(DiscoverAsync);
         SearchCommand = Command(SearchAsync);
         SampleCommand = Command(LoadSampleAsync);
-        DatasetCommand = Command(async () => { if (dialogs.Open("Dataset manifest|*.smds.json") is { } path) await LoadDatasetAsync(path); });
+        DatasetCommand = Command(async () => { if (dialogs.Open("Dataset manifest|*.smds.json;*.manifest.json") is { } path) await LoadDatasetAsync(path); });
         ImportCommand = Command(ImportPredictionsAsync);
         RegisterCommand = Command(RegisterOnnxAsync);
         ValidateCommand = Command(ValidateAsync);
@@ -369,7 +369,8 @@ public sealed class WorkbenchViewModel : ObservableObject, IDisposable
     public async Task LoadDatasetAsync(string path)
     {
         if (!CanReplaceWorkspace()) return;
-        var loaded = await Task.Run(() => DatasetLoader.LoadManifest(path), Token);
+        var loaded = await Task.Run(() => DatasetLoader.Load(path), Token);
+        DatasetPolicy.Ensure(loaded, DatasetOperation.Preview);
         if (loaded.ValidationIssues.Any(i => i.Severity == ValidationSeverity.Error))
             throw new InvalidDataException(string.Join("\n", loaded.ValidationIssues.Select(i => i.Message)));
         analysisCancellation?.Cancel();

@@ -216,6 +216,13 @@ public sealed class HuggingFaceProvider : IAcquiringModelProvider, ILocalCacheAw
 
     private static string OnnxQuant(string f) => f.Contains("int8") || f.Contains("quant") ? "INT8" : f.Contains("fp16") ? "FP16" : f.Contains("q4") ? "Q4" : "FP32";
 
+    /// <summary>
+    /// Semantic-search selectors list only embedding models (sentence-similarity / feature-extraction / sentence-transformers), never
+    /// text-generation, classification or reranking models whose outputs cannot be ranked against a corpus.
+    /// </summary>
+    public static bool IsSemanticSearchModel(ModelDescriptor d) =>
+        d.Tasks.Contains(EvalTask.Retrieval) && !d.Tasks.Contains(EvalTask.Generative) && d.OutputModality == Modality.Embedding;
+
     public async Task<ModelDescriptor> AcquireAsync(ModelDescriptor model, IProgress<ProgressInfo>? progress, CancellationToken cancellationToken)
     {
         var repoId = model.Identity.ModelId;

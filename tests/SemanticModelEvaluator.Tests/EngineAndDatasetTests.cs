@@ -10,7 +10,7 @@ using Xunit;
 namespace SemanticModelEvaluator.Tests;
 
 /// <summary>Test provider whose runners fail, hang, or work on demand.</summary>
-public sealed class FakeProvider(string id, Func<string, ITextEmbeddingRunner> make) : IModelProvider
+public sealed class FakeProvider(string id, Func<string, IModelRunner> make) : IModelProvider
 {
     public string Id => id;
     public string DisplayName => id;
@@ -42,6 +42,54 @@ public sealed class LambdaRunner(ModelDescriptor model, Func<IReadOnlyList<strin
 public class EvaluationEngineTests
 {
     private static ProviderRegistry Registry(params IModelProvider[] extra) => new([new DeterministicProvider(), .. extra]);
+
+    private sealed class DatasetRunner(ModelDescriptor model, ProgressInfo update) : IDatasetModelRunner
+    {
+        public ModelDescriptor Model { get; } = model;
+        public RuntimeInfo Runtime { get; } = new("test", "CPU", 1);
+        public bool Disposed { get; private set; }
+
+        public Task EvaluateAsync(EvalDataset dataset, EvaluationConfig config, ModelRunResult result,
+            IProgress<ProgressInfo>? progress, CancellationToken cancellationToken)
+        {
+            progress?.Report(update);
+            return Task.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            Disposed = true;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    [Theory]
+    [InlineData(null, 0, 0)]
+    [InlineData(0.0, 0, 100)]
+    [InlineData(0.42, 42, 100)]
+    [InlineData(1.0, 100, 100)]
+    public async Task Dataset_runner_progress_uses_message_and_fraction_without_reporting_a_warning(double? fraction, int completed, int total)
+    {
+        var model = FakeProvider.Model("dataset", "whole-dataset");
+        model.Execution = ExecutionKind.ExternalProcess;
+        model.OutputModality = Modality.Scores;
+        model.Properties["dataset_execution"] = "true";
+        var runner = new DatasetRunner(model, new ProgressInfo("Evaluating dataset", fraction));
+        var engine = new EvaluationEngine(Registry(new FakeProvider("dataset", _ => runner)));
+        var progress = new List<EvaluationProgress>();
+
+        var run = await engine.RunAsync(Fixtures.Retrieval(), [new(model)], new EvaluationConfig(),
+            new SyncProgress<EvaluationProgress>(progress.Add), CancellationToken.None);
+
+        Assert.Equal(RunStatus.Completed, run.Status);
+        var update = Assert.Single(progress, p => p.Stage == "Evaluating dataset");
+        Assert.Equal(completed, update.Completed);
+        Assert.Equal(total, update.Total);
+        Assert.Equal(total - completed, update.Remaining);
+        Assert.Equal(model.DisplayName, update.ModelName);
+        Assert.Null(update.Warning);
+        Assert.True(runner.Disposed);
+    }
 
     [Fact]
     public async Task Runs_two_deterministic_models_and_imported_predictions_on_sample()

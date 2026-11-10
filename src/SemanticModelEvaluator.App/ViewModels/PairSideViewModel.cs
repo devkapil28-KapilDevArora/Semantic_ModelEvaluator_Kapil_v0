@@ -119,7 +119,7 @@ public sealed class PairSideViewModel : ObservableObject
         {
             if (!SetProperty(ref source, value)) return;
             Run = null; Runs.Clear(); Jobs.Clear(); loadedResult = null;
-            foreach (var n in new[] { nameof(IsProviderSource), nameof(IsFolderSource), nameof(IsCloudSource), nameof(IsBundleSource), nameof(IsSavedSource), nameof(IsCapturedSource), nameof(SourceExplanation) })
+            foreach (var n in new[] { nameof(IsProviderSource), nameof(IsFolderSource), nameof(IsCloudSource), nameof(IsBundleSource), nameof(IsSavedSource), nameof(IsCapturedSource), nameof(SourceExplanation), nameof(IsPsapiLive) })
                 OnPropertyChanged(n);
             if (value == SideSource.EvalKitCachedBundle) _ = RefreshBundlesCommand.ExecuteAsync(null);
             RaiseChanged();
@@ -154,20 +154,26 @@ public sealed class PairSideViewModel : ObservableObject
             if (!SetProperty(ref model, value)) return;
             Validation = ""; OnPropertyChanged(nameof(ModelDetail));
             if (value is { Identity.ProviderId: PsapiProvider.ProviderId, LocalPath: { Length: > 0 } folder }) { UseCapturedBundle(folder, value.DisplayName); return; }
+            OnPropertyChanged(nameof(IsPsapiLive));
             RaiseChanged();
         }
     }
 
-    /// <summary>PSAPI cannot be invoked (undocumented contract), so a PSAPI model is compared through its captured, verified EvalKit bundle.</summary>
+    /// <summary>The PSAPI catalog model selected for a live local EvalKit-backend run (null for every other selection).</summary>
+    public PsapiModelSpec? PsapiSpec => source == SideSource.NewEvaluation && model is { Identity.ProviderId: PsapiProvider.ProviderId, LocalPath: null or "" }
+        ? PsapiProvider.Find(model.Identity.ModelId) : null;
+    public bool IsPsapiLive => PsapiSpec is not null;
+
+    /// <summary>A captured PSAPI bundle (cloud result) was chosen: compare its recorded scores; no model is invoked.</summary>
     private void UseCapturedBundle(string folder, string label)
     {
         source = SideSource.EvalKitCachedBundle;
         OnPropertyChanged(nameof(Source));
-        foreach (var n in new[] { nameof(IsProviderSource), nameof(IsFolderSource), nameof(IsCloudSource), nameof(IsBundleSource), nameof(IsSavedSource), nameof(IsCapturedSource), nameof(SourceExplanation) })
+        foreach (var n in new[] { nameof(IsProviderSource), nameof(IsFolderSource), nameof(IsCloudSource), nameof(IsBundleSource), nameof(IsSavedSource), nameof(IsCapturedSource), nameof(SourceExplanation), nameof(IsPsapiLive) })
             OnPropertyChanged(n);
         Bundles.Clear(); Bundles.Add(new BundleChoice(folder, label));
         Bundle = Bundles[0];
-        report($"{label}: live PSAPI invocation is blocked (undocumented contract); its captured EvalKit results were loaded instead. No model is invoked.");
+        report($"{label}: captured PSAPI results from a verified EvalKit bundle were loaded. No model is invoked.");
         RaiseChanged();
     }
 
@@ -278,11 +284,13 @@ public sealed class PairSideViewModel : ObservableObject
             Connection = Redactor.Redact($"{p.DisplayName}: {health.Status}{(string.IsNullOrEmpty(health.Detail) ? "" : " — " + health.Detail)}");
             var found = await Task.Run(() => p.DiscoverAsync(new ModelQuery(), token()));
             if (provider != p) return;
-            foreach (var m in found) Models.Add(m);
+            var listed = SemanticSearchOnly(p, found);
+            foreach (var m in listed) Models.Add(m);
+            if (listed.Count < found.Count) Connection += $"\n{found.Count - listed.Count} non-semantic-search model(s) hidden (generation, classification or reranking).";
             if (found.Count == 0) Connection += p.Id switch
             {
                 FoundryProvider.ProviderId => "\nNo deployments configured. Add one in Settings → Provider settings → Microsoft AI Foundry.",
-                PsapiProvider.ProviderId => "\nNo captured PSAPI runs cached yet. Use an EvalKit cloud or local source.",
+                PsapiProvider.ProviderId => "\nNo PSAPI models found.",
                 HuggingFaceProvider.ProviderId => "\nNo cached Hugging Face models. Search the hub below.",
                 _ => "\nNo models found."
             };
@@ -313,9 +321,14 @@ public sealed class PairSideViewModel : ObservableObject
         var query = Search;
         var found = await Task.Run(() => p.DiscoverAsync(new ModelQuery(query, AllowNetwork: true), token()));
         if (!ReferenceEquals(provider, p)) { report("Provider changed during search; results discarded."); return; }
-        Models.Clear(); foreach (var m in found) Models.Add(m);
-        report($"{found.Count} model(s) found. Check license and compatibility before downloading.");
+        var listed = SemanticSearchOnly(p, found);
+        Models.Clear(); foreach (var m in listed) Models.Add(m);
+        report($"{listed.Count} semantic-search model(s) found" + (listed.Count < found.Count ? $" ({found.Count - listed.Count} other model(s) hidden)" : "") +
+               ". Check license and compatibility before downloading.");
     }
+
+    private static List<ModelDescriptor> SemanticSearchOnly(IModelProvider p, IReadOnlyList<ModelDescriptor> found) =>
+        p.Id == HuggingFaceProvider.ProviderId ? [.. found.Where(HuggingFaceProvider.IsSemanticSearchModel)] : [.. found];
 
     private async Task PrepareAsync()
     {
@@ -434,14 +447,19 @@ public sealed class PairSideViewModel : ObservableObject
     public static DatasetReference RunDatasetOf(EvalKitRun ek) =>
         new(ek.Dataset.Name ?? "unknown", ek.Dataset.Name ?? "unknown", ek.Dataset.Version ?? "?", EvalTask.Retrieval, null, ek.Dataset.PayloadHash ?? "");
 
-    /// <summary>Reads captured scores for the selected run (cached after the first read). Never invokes a model.</summary>
-    public ModelRunResult? LoadCaptured(int retainDepth, CancellationToken ct = default)
+    /// <summary>
+    /// Reads captured scores for the selected run (cached after the first read). Never invokes a model.
+    /// Expected query ids (from the exact matching dataset) let queries with no result rows count as empty.
+    /// </summary>
+    public ModelRunResult? LoadCaptured(int retainDepth, CancellationToken ct = default, IReadOnlyCollection<string>? expectedQueryIds = null)
     {
         if (run is null) return null;
-        if (loadedResult is not null) return loadedResult;
-        loadedResult = run.Saved ?? (run.EvalKit is { } ek ? EvalKitFormat.ReadResults(ek, Math.Max(retainDepth, 1000), ct) : null);
+        if (loadedResult is not null && loadedWithExpectedIds == (expectedQueryIds is not null)) return loadedResult;
+        loadedResult = run.Saved ?? (run.EvalKit is { } ek ? EvalKitFormat.ReadResults(ek, Math.Max(retainDepth, 1000), ct, expectedQueryIds) : null);
+        loadedWithExpectedIds = expectedQueryIds is not null;
         return loadedResult;
     }
+    private bool loadedWithExpectedIds;
 
     public void SelectProviderModel(string providerId, ModelDescriptor descriptor)
     {

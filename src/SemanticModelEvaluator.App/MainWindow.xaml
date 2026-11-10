@@ -84,7 +84,11 @@
          <ComboBox ItemsSource="{Binding Runs}" SelectedItem="{Binding Run}" AutomationProperties.Name="{Binding Title, StringFormat='{}{0} captured run'}"/>
          <Button Content="Validate run" Command="{Binding ValidateCommand}" HorizontalAlignment="Left"/>
         </StackPanel>
-        <TextBlock Text="{Binding ModelDetail}" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12" Margin="0,8,0,0"/>
+        <TextBlock Visibility="{Binding IsPsapiLive, Converter={StaticResource BoolVisibility}}" TextWrapping="Wrap" Margin="0,6,0,0" Foreground="{DynamicResource MutedBrush}"
+                   Text="PSAPI: runs the whole dataset as an EvalKit job on the local CPU backend (no network). Needs an EvalKit dataset manifest; Florence and Genoa need an image corpus, Space v6 and Palermo a text corpus."/>
+        <Expander Header="Configuration details (advanced)" Margin="0,8,0,0" AutomationProperties.Name="{Binding Title, StringFormat='{}{0} configuration details'}">
+         <TextBlock Text="{Binding ModelDetail}" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12" Margin="0,4,0,0"/>
+        </Expander>
         <TextBlock Text="{Binding Validation}" TextWrapping="Wrap" Margin="0,6,0,0" AutomationProperties.LiveSetting="Polite"/>
        </StackPanel>
       </Border>
@@ -127,6 +131,7 @@
       <GroupBox Header="Step 3 · Dataset and evaluation">
        <StackPanel>
         <WrapPanel>
+         <Button Content="Browse public / internal datasets..." Click="BrowseDatasets" AutomationProperties.AutomationId="PairBrowseDatasets"/>
          <Button Content="Open dataset manifest..." Command="{Binding OpenDatasetCommand}" AutomationProperties.AutomationId="PairOpenDataset"/>
          <Button Content="Use exact cached EvalKit dataset" Command="{Binding FindCachedDatasetCommand}"/>
          <ComboBox ItemsSource="{Binding DatasetStores}" SelectedItem="{Binding DatasetStore}" MinWidth="260" Margin="8,0,4,0" AutomationProperties.Name="Dataset container (published or working, sensitivity)" ToolTip="Published or working (staging) dataset container to fetch from. Azure enforces your access; no other container is tried."/>
@@ -277,6 +282,21 @@
              </StackPanel>
             </Grid>
            </DockPanel>
+          </TabItem>
+          <TabItem Header="Compatibility and agreement">
+           <StackPanel>
+            <DataGrid ItemsSource="{Binding CompatibilityRows}" AutoGenerateColumns="False" IsReadOnly="True" AutomationProperties.AutomationId="PairCompatibility">
+             <DataGrid.Columns>
+              <DataGridTextColumn Header="Check" Binding="{Binding Aspect}"/>
+              <DataGridTextColumn Header="Status" Binding="{Binding StatusText}"/>
+              <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="*">
+               <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="TextWrapping" Value="Wrap"/></Style></DataGridTextColumn.ElementStyle>
+              </DataGridTextColumn>
+             </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock Text="Ranking agreement (rank-based; independent of each model's score scale)" FontWeight="SemiBold" Margin="4,10,4,2"/>
+            <TextBlock Text="{Binding AgreementText}" TextWrapping="Wrap" Margin="4" AutomationProperties.AutomationId="PairAgreement"/>
+           </StackPanel>
           </TabItem>
           <TabItem Header="Strengths and limitations">
            <StackPanel>
@@ -516,6 +536,9 @@
       </StackPanel>
      </GroupBox>
     </StackPanel></ScrollViewer>
+   </TabItem>
+   <TabItem Header="07  Dataset Hub" x:Name="DatasetHubTab" AutomationProperties.AutomationId="DatasetHubTab">
+    <charts:DatasetHubView/>
    </TabItem>
   </TabControl>
  </DockPanel>

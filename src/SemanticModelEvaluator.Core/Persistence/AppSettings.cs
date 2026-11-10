@@ -66,6 +66,7 @@ public sealed class EvalKitSettings
 
 public sealed class AppSettings
 {
+    public List<PsapiBuildRegistration> PsapiBuilds { get; set; } = [];
     public List<FoundryDeployment> FoundryDeployments { get; set; } = [];
     public EvalKitSettings EvalKit { get; set; } = new();
     public string Theme { get; set; } = "Light";
@@ -77,6 +78,16 @@ public sealed class AppSettings
     public List<ImportedPredictionsEntry> ImportedPredictions { get; set; } = [];
     public List<string> RecentWorkspaces { get; set; } = [];
     public List<string> RecentDatasets { get; set; } = [];
+}
+
+public sealed class PsapiBuildRegistration
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string Label { get; set; } = "";
+    public string RepositoryRoot { get; set; } = "";
+    public string BackendDirectory { get; set; } = "";
+    public string CliPath { get; set; } = "";
+    public string? Fingerprint { get; set; }
 }
 
 public sealed class SettingsStore(string path)

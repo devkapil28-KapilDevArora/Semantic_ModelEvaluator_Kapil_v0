@@ -79,12 +79,19 @@ public sealed class EvaluationEngine(ProviderRegistry providers, EmbeddingCache?
                 continue;
             }
             if (m.Readiness != ReadinessState.Ready) { report.Items.Add((name, ValidationSeverity.Error, $"Not ready: {m.Readiness} — {m.ReadinessDetail}")); continue; }
-            bool native = task switch
+            bool datasetRunner = m.Properties.GetValueOrDefault("dataset_execution") == "true";
+            bool native = datasetRunner || task switch
             {
                 EvalTask.Retrieval or EvalTask.SemanticSimilarity => m.InputModality is Modality.Text or Modality.Multimodal && m.OutputModality == Modality.Embedding,
                 _ => false
             };
             if (!native) { report.Items.Add((name, ValidationSeverity.Error, $"{task} cannot be executed natively with this model in V0; import predictions instead.")); continue; }
+            if (datasetRunner && m.Properties.GetValueOrDefault("query_modality") == "text" && dataset.Queries.Any(q => q.ImagePath is not null || string.IsNullOrWhiteSpace(q.Text)))
+            { report.Items.Add((name, ValidationSeverity.Error, "This backend requires text-only queries; image queries need imported predictions or another runner.")); continue; }
+            if (datasetRunner && m.Properties.GetValueOrDefault("corpus_modality") == "image" && dataset.Documents.Any(d => d.ImagePath is null))
+            { report.Items.Add((name, ValidationSeverity.Error, "This backend requires an image corpus for every candidate.")); continue; }
+            if (datasetRunner && m.Properties.GetValueOrDefault("corpus_modality") == "text" && dataset.Documents.Any(d => d.ImagePath is not null))
+            { report.Items.Add((name, ValidationSeverity.Error, "This backend requires a text corpus for every candidate.")); continue; }
             if (task == EvalTask.Retrieval && dataset.Documents.Any(d => string.IsNullOrEmpty(d.Text) && d.ImagePath is not null) && m.InputModality == Modality.Text)
                 report.Items.Add((name, ValidationSeverity.Warning, "Image-only documents cannot be encoded by a text model and will be skipped."));
             if (m.IsSynthetic) report.Items.Add((name, ValidationSeverity.Warning, "Synthetic deterministic baseline — results are not representative of neural model quality."));
@@ -101,6 +108,9 @@ public sealed class EvaluationEngine(ProviderRegistry providers, EmbeddingCache?
     public async Task<EvaluationRun> RunAsync(EvalDataset dataset, IReadOnlyList<ModelPlan> plans, EvaluationConfig config,
         IProgress<EvaluationProgress>? progress, CancellationToken ct, string? name = null)
     {
+        DatasetPolicy.Ensure(dataset, DatasetOperation.Evaluate);
+        if (plans.Any(p => p.Model.Properties.GetValueOrDefault("remote_inference") == "true"))
+            DatasetPolicy.Ensure(dataset, DatasetOperation.ExternalProcessing);
         if (plans.Count == 0) throw new ArgumentException("Select at least one model.");
         if (config.K < 1 || config.RetainDepth < config.K || config.BatchSize < 1 || config.MaxConcurrency < 1)
             throw new ArgumentException("K, batch size and concurrency must be positive; retain depth must be at least K.");
@@ -191,6 +201,13 @@ public sealed class EvaluationEngine(ProviderRegistry providers, EmbeddingCache?
         var load = Stopwatch.StartNew();
         await using var runner = await provider.LoadAsync(model, new RuntimeOptions(config.Device, BatchSize: config.BatchSize), ct).ConfigureAwait(false);
         load.Stop();
+        if (runner is IDatasetModelRunner whole)
+        {
+            await whole.EvaluateAsync(dataset, config, result,
+                new InlineProgress(p => report(p.Message, p.Fraction is { } fraction ? (int)(fraction * 100) : 0,
+                    p.Fraction.HasValue ? 100 : 0, null)), ct).ConfigureAwait(false);
+            return;
+        }
         if (runner is not ITextEmbeddingRunner embedder)
             throw new NotSupportedException($"{model.DisplayName} does not provide text embeddings.");
         result.Performance = new PerformanceStats
@@ -220,6 +237,11 @@ public sealed class EvaluationEngine(ProviderRegistry providers, EmbeddingCache?
             if (runner is IUsageReportingRunner usage) result.Performance.Usage = usage.Usage;
         }
         result.Performance.PeakWorkingSetBytes = Process.GetCurrentProcess().PeakWorkingSet64;
+    }
+
+    private sealed class InlineProgress(Action<ProgressInfo> report) : IProgress<ProgressInfo>
+    {
+        public void Report(ProgressInfo value) => report(value);
     }
 
     private async Task<Dictionary<string, float[]>> EncodeAsync(ITextEmbeddingRunner embedder, IReadOnlyList<(string Id, string Text)> items,

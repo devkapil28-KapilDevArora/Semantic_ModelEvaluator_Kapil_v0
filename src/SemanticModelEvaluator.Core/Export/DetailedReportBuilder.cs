@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using System.Text;
+using SemanticModelEvaluator.Core.Datasets;
 using SemanticModelEvaluator.Core.Metrics;
 using SemanticModelEvaluator.Core.Pairing;
 using SemanticModelEvaluator.Core.Security;
@@ -51,6 +52,7 @@ public static partial class DetailedReportBuilder
 
     public static string Build(PairComparisonResult r, DetailedReportOptions o)
     {
+        DatasetPolicy.Ensure(r.Dataset.Provenance, o.IncludeSampleContent ? DatasetOperation.ExportSamples : DatasetOperation.ExportSummary);
         // SVG coordinates and every interpolated number must use '.' decimals regardless of the user's locale.
         var previous = CultureInfo.CurrentCulture;
         CultureInfo.CurrentCulture = Inv;
@@ -94,50 +96,79 @@ public static partial class DetailedReportBuilder
                           : sensitive ? "Sample-level content (query text, labels, images, item and document identifiers, per-item scores) is omitted; aggregate results only."
                           : "Sample-level content (query text, labels, images) is omitted; identifiers and scores only.")
           .Append("</p></header>\n<nav class=\"toc\" aria-label=\"Contents\"><ol>");
-        string[] titles = ["Executive summary", "Evaluation objective", "Model A configuration", "Model B configuration", "Provider and version information",
-            "Dataset and exact version", "Data-source provenance", "Evaluation configuration", "Summary metrics and deltas", "Quality assessment",
-            "Safety and harm assessment", "Empty-query, failure and unjudged analysis", "Threshold analysis", "Visual comparisons",
-            "Query-level findings", "Strengths and weaknesses", "Evidence-based recommendation", "Limitations and missing data",
-            "Reproducibility", "Generation timestamp", "Application version"];
+        string[] titles = ["Executive summary", "Decision context", "Evaluation objective", "Model A profile", "Model B profile",
+            "Source provenance (PSAPI / Hugging Face / other)", "Version, revision and configuration fingerprint", "Dataset and exact version",
+            "Data-source provenance", "Evaluation and inclusion settings", "Compatibility assessment", "Summary metrics",
+            "Retrieval-quality assessment", "Safety and harm assessment", "Empty-result and error analysis", "Judgment coverage and unjudged analysis",
+            "Latency and reliability", "Threshold analysis", "Query-level differences", "Strengths and weaknesses", "Evidence-based recommendation",
+            "Limitations", "Missing data", "Reproducibility metadata", "Generation timestamp", "Application version", "Source commit", "Report schema version"];
         for (int i = 0; i < titles.Length; i++) sb.Append("<li><a href=\"#s").Append(i + 1).Append("\">").Append(titles[i]).Append("</a></li>");
-        sb.Append("</ol></nav>\n<main>\n");
+        sb.Append("</ol><p class=\"toc-actions\"><button type=\"button\" data-expand=\"1\">Expand all sections</button> <button type=\"button\" data-expand=\"0\">Collapse all sections</button></p></nav>\n<main>\n");
 
+        // Section bodies are buffered per number so the code can be grouped by topic while the report keeps the fixed 28-section order.
+        var parts = new StringBuilder[titles.Length + 1];
         void Section(int n, Action body)
         {
-            sb.Append("<section id=\"s").Append(n).Append("\" aria-labelledby=\"h").Append(n).Append("\"><h2 id=\"h").Append(n).Append("\">")
-              .Append(n).Append(". ").Append(titles[n - 1]).Append("</h2>\n");
+            int start = sb.Length;
             body();
-            sb.Append("</section>\n");
+            (parts[n] ??= new StringBuilder()).Append(sb, start, sb.Length - start);
+            sb.Length = start;
         }
 
         Section(1, () =>
         {
-            sb.Append("<p class=\"headline\">").Append(H(r.Recommendation.Headline)).Append("</p>");
-            sb.Append("<p>").Append(H(r.Recommendation.Detail)).Append("</p>");
-            sb.Append("<p><strong>Confidence:</strong> <span class=\"chip\">").Append(r.Recommendation.Confidence).Append("</span> ").Append(H(r.Recommendation.ConfidenceReason)).Append("</p>");
+            sb.Append("<p class=\"headline\">").Append(H(ItemSafe(r.Recommendation.Headline))).Append("</p>");
+            sb.Append("<p>").Append(H(ItemSafe(r.Recommendation.Detail))).Append("</p>");
+            sb.Append("<p><strong>Confidence:</strong> <span class=\"chip\">").Append(r.Recommendation.Confidence).Append("</span> ").Append(H(ItemSafe(r.Recommendation.ConfidenceReason))).Append("</p>");
             if (!r.IsComparable) sb.Append("<p class=\"notice bad\" role=\"alert\"><strong>Not comparable.</strong> ").Append(H(ItemSafe(string.Join(" ", r.Blocking)))).Append("</p>");
             else if (!r.IsLikeForLike) sb.Append("<p class=\"notice warn\" role=\"alert\"><strong>Not fully like-for-like:</strong> ").Append(H(ItemSafe(string.Join(" ", r.Warnings)))).Append("</p>");
             else sb.Append("<p class=\"notice info\">Eligibility checks passed: same dataset identity and task on both sides.</p>");
             sb.Append("<p class=\"muted\">This is evidence for one dataset version and configuration; it does not show that either model is better in general.</p>");
         });
-        Section(2, () => sb.Append("<p>").Append(H(string.IsNullOrWhiteSpace(r.Settings.Objective)
+        Section(2, () =>
+        {
+            sb.Append("<p>Decision supported: which of the two configurations better serves <strong>this</strong> dataset version and scenario. The recommendation weighs, in order, ")
+              .Append("eligibility (blocking checks), judgment-based retrieval quality, safety/harm, reliability (errors, empty results), coverage and latency. ")
+              .Append("Cost is considered only when a trustworthy price is configured.</p><ul>");
+            sb.Append("<li>Model A: ").Append(H(a.Label)).Append(" — ").Append(H(Origin(r.A.Origin))).Append("</li>");
+            sb.Append("<li>Model B: ").Append(H(b.Label)).Append(" — ").Append(H(Origin(r.B.Origin))).Append("</li>");
+            sb.Append("<li>Metrics selected: ").Append(H(string.Join(", ", r.Metrics.Select(m => m.Definition.Name)))).Append("</li>");
+            sb.Append("<li>Raw scores comparable across the two models: ").Append(r.RawScoresComparable
+                ? "yes — same provider and model, so the score scale is shared."
+                : "<strong>no</strong> — the providers or models differ, so raw scores are not compared; ranks and judgment-based metrics are used instead. No score calibration was applied.").Append("</li>");
+            sb.Append("</ul>");
+        });
+        Section(3, () => sb.Append("<p>").Append(H(string.IsNullOrWhiteSpace(r.Settings.Objective)
             ? $"Compare {a.DisplayName} and {b.DisplayName} on {r.Dataset.Name} v{r.Dataset.Version} ({r.Dataset.Task}) to decide which configuration better meets quality and safety needs."
             : r.Settings.Objective)).Append("</p>"));
-        Section(3, () => ConfigTable(sb, r.A));
-        Section(4, () => ConfigTable(sb, r.B));
-        Section(5, () =>
+        Section(4, () => ConfigTable(sb, r.A));
+        Section(5, () => ConfigTable(sb, r.B));
+        Section(6, () =>
         {
-            sb.Append("<table><caption>Provider and version</caption><thead><tr><th scope=\"col\">Field</th><th scope=\"col\">Model A</th><th scope=\"col\">Model B</th></tr></thead><tbody>");
+            sb.Append("<table><caption>Provider and source provenance</caption><thead><tr><th scope=\"col\">Field</th><th scope=\"col\">Model A</th><th scope=\"col\">Model B</th></tr></thead><tbody>");
             Row3(sb, "Provider", a.ProviderName, b.ProviderName);
             Row3(sb, "Provider id", a.ProviderId, b.ProviderId);
             Row3(sb, "Model", a.ModelId, b.ModelId);
-            Row3(sb, "Version / revision", a.Revision ?? "unknown", b.Revision ?? "unknown");
-            Row3(sb, "Endpoint / deployment", a.Endpoint ?? "n/a (local or captured)", b.Endpoint ?? "n/a (local or captured)");
+            Row3(sb, "Source repository / model card", Provenance(a), Provenance(b));
+            Row3(sb, "Source commit inspected", a.Parameters.GetValueOrDefault("source_commit") ?? "n/a", b.Parameters.GetValueOrDefault("source_commit") ?? "n/a");
+            Row3(sb, "Invocation", a.Parameters.GetValueOrDefault("invocation") ?? Execution(r.A), b.Parameters.GetValueOrDefault("invocation") ?? Execution(r.B));
             Row3(sb, "Runtime", r.A.Result.Performance.Runtime, r.B.Result.Performance.Runtime);
             Row3(sb, "Execution", r.A.Result.Execution.ToString(), r.B.Result.Execution.ToString());
             sb.Append("</tbody></table>");
         });
-        Section(6, () =>
+        Section(7, () =>
+        {
+            sb.Append("<table><caption>Exact configuration of each side</caption><thead><tr><th scope=\"col\">Field</th><th scope=\"col\">Model A</th><th scope=\"col\">Model B</th></tr></thead><tbody>");
+            Row3(sb, "Version / revision / package", a.Revision ?? "unknown", b.Revision ?? "unknown");
+            Row3(sb, "Endpoint / deployment", a.Endpoint is null ? "n/a (local or captured)" : "configured (not exported)", b.Endpoint is null ? "n/a (local or captured)" : "configured (not exported)");
+            Row3(sb, "Embedding dimensions", a.Parameters.GetValueOrDefault("dimensions") ?? "unknown", b.Parameters.GetValueOrDefault("dimensions") ?? "unknown");
+            Row3(sb, "Similarity / score", a.Parameters.GetValueOrDefault("similarity") ?? "provider-defined (see model card)", b.Parameters.GetValueOrDefault("similarity") ?? "provider-defined (see model card)");
+            Row3(sb, "Normalization / pooling", Join(a.Parameters.GetValueOrDefault("normalization"), a.Parameters.GetValueOrDefault("pooling")), Join(b.Parameters.GetValueOrDefault("normalization"), b.Parameters.GetValueOrDefault("pooling")));
+            Row3(sb, "Max input tokens", a.Parameters.GetValueOrDefault("max_input_tokens") ?? "unknown", b.Parameters.GetValueOrDefault("max_input_tokens") ?? "unknown");
+            Row3(sb, "Configuration fingerprint (SHA-256 of provider, model, revision, endpoint, parameters)", Fingerprint(a), Fingerprint(b));
+            sb.Append("</tbody></table><p class=\"muted\">The fingerprint identifies a configuration without exporting endpoint values; identical fingerprints mean identical configurations.</p>");
+        });
+        Section(8, () =>
         {
             sb.Append("<dl>");
             Dl(sb, "Name", r.Dataset.Name); Dl(sb, "Identifier", r.Dataset.Id); Dl(sb, "Exact version", r.Dataset.Version);
@@ -146,7 +177,7 @@ public static partial class DetailedReportBuilder
             Dl(sb, "Items compared", r.Rows.Count.ToString(Inv));
             sb.Append("</dl>");
         });
-        Section(7, () =>
+        Section(9, () =>
         {
             sb.Append("<table><caption>Where each result came from</caption><thead><tr><th scope=\"col\">Field</th><th scope=\"col\">Model A</th><th scope=\"col\">Model B</th></tr></thead><tbody>");
             Row3(sb, "Origin", Origin(r.A.Origin), Origin(r.B.Origin));
@@ -157,7 +188,7 @@ public static partial class DetailedReportBuilder
             Row3(sb, "Run dataset identity", $"{r.A.RunDataset.Name} v{r.A.RunDataset.Version} {Short(r.A.RunDataset.ContentHash)}", $"{r.B.RunDataset.Name} v{r.B.RunDataset.Version} {Short(r.B.RunDataset.ContentHash)}");
             sb.Append("</tbody></table><p class=\"muted\">Links to storage are intentionally omitted. Changing the threshold recalculates metrics from captured scores; it never re-runs or retrains a model.</p>");
         });
-        Section(8, () =>
+        Section(10, () =>
         {
             sb.Append("<dl>");
             Dl(sb, "K (results considered per query)", r.Settings.K.ToString(Inv));
@@ -172,37 +203,67 @@ public static partial class DetailedReportBuilder
             foreach (var rule in PairComparer.EligibilityRules) sb.Append("<li>").Append(H(rule)).Append("</li>");
             sb.Append("</ul>");
         });
-        Section(9, () =>
+        Section(11, () =>
+        {
+            if (r.Compatibility.Count == 0) { sb.Append("<p>No compatibility checks were recorded.</p>"); return; }
+            sb.Append("<table><caption>Methodological compatibility checks (status is shown as text, not colour alone)</caption><thead><tr><th scope=\"col\">Check</th><th scope=\"col\">Status</th><th scope=\"col\">Detail</th></tr></thead><tbody>");
+            foreach (var c in r.Compatibility)
+                sb.Append("<tr><th scope=\"row\">").Append(H(c.Aspect)).Append("</th><td class=\"st-").Append(c.Status.ToString().ToLowerInvariant()).Append("\">")
+                  .Append(c.Status switch { CompatibilityStatus.Pass => "✔ Pass", CompatibilityStatus.Note => "ℹ Note", CompatibilityStatus.Warning => "⚠ Warning", CompatibilityStatus.Blocked => "✖ Blocked", _ => "? Unknown" })
+                  .Append("</td><td>").Append(H(ItemSafe(c.Detail))).Append("</td></tr>");
+            sb.Append("</tbody></table>");
+        });
+        Section(12, () =>
         {
             MetricTable(sb, r.Metrics, "All comparable metrics");
+        });
+        Section(17, () =>
+        {
             sb.Append("<table><caption>Latency, errors and usage</caption><thead><tr><th scope=\"col\">Measure</th><th scope=\"col\">Model A</th><th scope=\"col\">Model B</th><th scope=\"col\">Δ (A − B)</th><th scope=\"col\">Basis</th></tr></thead><tbody>");
             foreach (var p in r.Performance)
                 sb.Append("<tr><th scope=\"row\">").Append(H(p.Name)).Append("</th><td>").Append(F(p.A, p.Format)).Append("</td><td>").Append(F(p.B, p.Format))
                   .Append("</td><td>").Append(D(p.Delta, p.Format)).Append("</td><td>").Append(H(p.Basis)).Append("</td></tr>");
-            sb.Append("</tbody></table>");
+            sb.Append("</tbody></table><p class=\"muted\">Percentiles are shown only with enough per-item samples (P50 ≥ 5, P95 ≥ 20, P99 ≥ 100); otherwise they are unknown. ")
+              .Append("Latencies measured on different machines, backends or networks are not like-for-like. Runtimes: A ")
+              .Append(H(U(r.A.Result.Performance.Runtime))).Append(" on ").Append(H(U(r.A.Result.Performance.Device))).Append("; B ")
+              .Append(H(U(r.B.Result.Performance.Runtime))).Append(" on ").Append(H(U(r.B.Result.Performance.Device))).Append(".</p>");
+            sb.Append("<p>Reliability: errors A ").Append(r.CountsA.Errors.ToString(Inv)).Append(" / B ").Append(r.CountsB.Errors.ToString(Inv))
+              .Append("; missing from run A ").Append(r.CountsA.Missing.ToString(Inv)).Append(" / B ").Append(r.CountsB.Missing.ToString(Inv)).Append(".</p>");
         });
-        Section(10, () =>
+        Section(13, () =>
         {
             var q = r.Metrics.Where(m => m.Definition.Category == MetricCategory.Quality).ToList();
-            if (q.Count == 0) { sb.Append("<p>No quality metric could be computed (judgments or labels are missing).</p>"); return; }
-            MetricTable(sb, q, "Quality metrics");
-            sb.Append("<p>Per-item primary quality (").Append(H(r.PrimaryMetricId ?? (r.IsRetrieval ? "nDCG@K" : "correctness"))).Append("): A better on <strong>").Append(r.AWins)
-              .Append("</strong>, B better on <strong>").Append(r.BWins).Append("</strong>, ties ").Append(r.Ties).Append(", unknown ").Append(r.Unknown)
-              .Append(r.Recommendation.SignTestP is { } p ? $" (two-sided sign test p = {p.ToString("0.0000", Inv)})" : "").Append(".</p>");
+            if (q.Count == 0) sb.Append("<p>No quality metric could be computed (judgments or labels are missing).</p>");
+            else
+            {
+                MetricTable(sb, q, "Quality metrics");
+                sb.Append("<p>Per-item primary quality (").Append(H(r.PrimaryMetricId ?? (r.IsRetrieval ? "nDCG@K" : "correctness"))).Append("): A better on <strong>").Append(r.AWins)
+                  .Append("</strong>, B better on <strong>").Append(r.BWins).Append("</strong>, ties ").Append(r.Ties).Append(", unknown ").Append(r.Unknown)
+                  .Append(r.Recommendation.SignTestP is { } p ? $" (two-sided sign test p = {p.ToString("0.0000", Inv)})" : "").Append(".</p>");
+            }
+            if (r.Agreement is { } g)
+            {
+                sb.Append("<h3>Agreement between the two rankings (rank-based, valid across providers)</h3><table><caption>Top-K agreement over ")
+                  .Append(g.Queries.ToString(Inv)).Append(" queries answered by both models</caption><tbody>");
+                Row2(sb, "Mean top-K overlap (Jaccard, higher = more similar)", F(g.MeanTopKOverlap));
+                Row2(sb, $"Mean Spearman rank correlation ({g.RankCorrelationQueries.ToString(Inv)} queries)", F(g.MeanRankCorrelation));
+                Row2(sb, "Relevant documents retained: A / B / both", $"{g.RelevantA.ToString(Inv)} / {g.RelevantB.ToString(Inv)} / {g.RelevantBoth.ToString(Inv)}");
+                Row2(sb, "Queries where B missed a relevant item A found", g.RelevantMissedByB.ToString(Inv));
+                Row2(sb, "Queries where A missed a relevant item B found", g.RelevantMissedByA.ToString(Inv));
+                sb.Append("</tbody></table><p class=\"muted\">").Append(H(PairAgreement.Method)).Append("</p>");
+            }
         });
-        Section(11, () =>
+        Section(14, () =>
         {
             var h = r.Metrics.Where(m => m.Definition.Category == MetricCategory.Harm).ToList();
             if (h.Count == 0) { sb.Append("<p>No harm metric is available: the dataset has no safety judgments. Unjudged results are never treated as safe.</p>"); }
             else MetricTable(sb, h, "Harm metrics — lower is better; values are the actual measured rates (not inverted)");
             sb.Append("<p>Items where at least one model retained a result judged harmful: <strong>").Append(r.Rows.Count(x => x.Flags.HasFlag(QueryFlags.SafetyConcern))).Append("</strong>.</p>");
         });
-        Section(12, () =>
+        Section(15, () =>
         {
-            sb.Append("<table><caption>Coverage and failures</caption><thead><tr><th scope=\"col\">Count</th><th scope=\"col\">Model A</th><th scope=\"col\">Model B</th></tr></thead><tbody>");
+            sb.Append("<table><caption>Empty results and failures</caption><thead><tr><th scope=\"col\">Count</th><th scope=\"col\">Model A</th><th scope=\"col\">Model B</th></tr></thead><tbody>");
             Row3(sb, "Items in scope", r.CountsA.Total.ToString(Inv), r.CountsB.Total.ToString(Inv));
-            Row3(sb, "Judged items", r.CountsA.Judged.ToString(Inv), r.CountsB.Judged.ToString(Inv));
-            Row3(sb, "Unjudged items (unknown)", r.CountsA.Unjudged.ToString(Inv), r.CountsB.Unjudged.ToString(Inv));
             Row3(sb, "Evaluated (no error)", r.CountsA.Evaluated.ToString(Inv), r.CountsB.Evaluated.ToString(Inv));
             if (r.IsRetrieval)
             {
@@ -212,9 +273,18 @@ public static partial class DetailedReportBuilder
             }
             Row3(sb, "Errors (model failed on the item)", r.CountsA.Errors.ToString(Inv), r.CountsB.Errors.ToString(Inv));
             Row3(sb, "Missing from run", r.CountsA.Missing.ToString(Inv), r.CountsB.Missing.ToString(Inv));
-            sb.Append("</tbody></table><p class=\"muted\">Failed, missing and unjudged items are not scored as zero; they are excluded from quality metrics and reported here.</p>");
+            sb.Append("</tbody></table><p class=\"muted\">Failed and missing items are not scored as zero; they are excluded from quality metrics and reported here.</p>");
         });
-        Section(13, () =>
+        Section(16, () =>
+        {
+            sb.Append("<table><caption>Judgment coverage</caption><thead><tr><th scope=\"col\">Count</th><th scope=\"col\">Model A</th><th scope=\"col\">Model B</th></tr></thead><tbody>");
+            Row3(sb, "Judged items", r.CountsA.Judged.ToString(Inv), r.CountsB.Judged.ToString(Inv));
+            Row3(sb, "Unjudged items (unknown)", r.CountsA.Unjudged.ToString(Inv), r.CountsB.Unjudged.ToString(Inv));
+            Row3(sb, "Judged share", Share(r.CountsA.Judged, r.CountsA.Total), Share(r.CountsB.Judged, r.CountsB.Total));
+            sb.Append("</tbody></table><p class=\"muted\">Unjudged samples are unknown: they are never treated as relevant, irrelevant, safe or harmful. Inclusion rule: ")
+              .Append(r.Settings.JudgedItemsOnly ? "judged items only." : "all items, with unjudged reported as unknown.").Append("</p>");
+        });
+        Section(18, () =>
         {
             if (r.CurveA is null || r.CurveB is null) { sb.Append("<p>Threshold analysis is not available (no comparable score data or the runs are not comparable).</p>"); return; }
             sb.Append("<p>Each model is swept over its own score range because providers use different score scales. Curves are recalculated from captured scores. Active thresholds (vertical markers): A ")
@@ -239,11 +309,11 @@ public static partial class DetailedReportBuilder
             }
             sb.Append("</div>");
         });
-        Section(14, () =>
+        Section(12, () =>
         {
             var bounded = r.Metrics.Where(m => m.Definition.IsBounded01 && m.A?.Value is not null && m.B?.Value is not null).ToList();
-            if (bounded.Count == 0) { sb.Append("<p>No bounded metric is available on both sides.</p>"); return; }
-            sb.Append("<figure>").Append(Svg.Bars(bounded, a.DisplayName, b.DisplayName)).Append("<figcaption>Side-by-side values on a fixed 0–1 scale. Exact values are in section 9.</figcaption></figure>");
+            if (bounded.Count == 0) { sb.Append("<p>No bounded metric is available on both sides, so no chart is drawn.</p>"); return; }
+            sb.Append("<h3>Visual comparison</h3><figure>").Append(Svg.Bars(bounded, a.DisplayName, b.DisplayName)).Append("<figcaption>Side-by-side values on a fixed 0–1 scale. Exact values are in the table above.</figcaption></figure>");
             sb.Append("<h3>Metric-difference heatmap</h3><table class=\"heat\"><caption>Δ = A − B; ▲ favours A, ▼ favours B, ● tie, · no preferred direction</caption><thead><tr><th scope=\"col\">Metric</th><th scope=\"col\">Δ</th><th scope=\"col\">Favours</th></tr></thead><tbody>");
             foreach (var m in bounded)
             {
@@ -259,8 +329,15 @@ public static partial class DetailedReportBuilder
                 sb.Append("<figure>").Append(Svg.Radar(radar, a.DisplayName, b.DisplayName)).Append("<figcaption>Radar of quality metrics that share the same 0–1 scale where higher is better. Harm metrics are excluded rather than inverted.</figcaption></figure>");
             else sb.Append("<p class=\"muted\">Radar chart omitted: fewer than three quality metrics share a meaningful 0–1 scale.</p>");
         });
-        Section(15, () => QueryTable(sb, r, o, content));
-        Section(16, () =>
+        Section(12, () =>
+        {
+            sb.Append("<details class=\"defs\"><summary>What each metric means</summary><dl>");
+            foreach (var m in r.Metrics) Dl(sb, m.Definition.Name, $"{m.Definition.Explanation} ({m.DirectionNote}.)");
+            if (r.Agreement is not null) Dl(sb, "Top-K overlap and rank correlation", PairAgreement.Method);
+            sb.Append("</dl></details>");
+        });
+        Section(19, () => QueryTable(sb, r, o, content));
+        Section(20, () =>
         {
             sb.Append("<div class=\"grid2\">");
             foreach (var (label, s, w) in new[] { ("Model A — " + a.DisplayName, r.StrengthsA, r.WeaknessesA), ("Model B — " + b.DisplayName, r.StrengthsB, r.WeaknessesB) })
@@ -273,19 +350,36 @@ public static partial class DetailedReportBuilder
             }
             sb.Append("</div>");
         });
-        Section(17, () =>
+        Section(21, () =>
         {
-            sb.Append("<p class=\"headline\">").Append(H(r.Recommendation.Headline)).Append("</p><p>").Append(H(r.Recommendation.Detail)).Append("</p>")
-              .Append("<p>Confidence: <strong>").Append(r.Recommendation.Confidence).Append("</strong> — ").Append(H(r.Recommendation.ConfidenceReason)).Append("</p>")
+            sb.Append("<p class=\"headline\">").Append(H(ItemSafe(r.Recommendation.Headline))).Append("</p><p>").Append(H(ItemSafe(r.Recommendation.Detail))).Append("</p>")
+              .Append("<p>Confidence: <strong>").Append(r.Recommendation.Confidence).Append("</strong> — ").Append(H(ItemSafe(r.Recommendation.ConfidenceReason))).Append("</p>")
               .Append("<p class=\"muted\">Neutral, evidence-based guidance for this dataset version and configuration. Validate on representative data before deployment decisions.</p>");
         });
-        Section(18, () =>
+        Section(22, () =>
         {
             sb.Append("<ul>");
             foreach (var l in r.Blocking.Concat(r.Warnings).Concat(r.Limitations).Select(ItemSafe).Distinct()) sb.Append("<li>").Append(H(l)).Append("</li>");
+            if (!r.RawScoresComparable) sb.Append("<li>Raw scores come from different models or providers and are not on a shared scale; they were not compared directly.</li>");
             sb.Append("</ul>");
         });
-        Section(19, () =>
+        Section(23, () =>
+        {
+            var unknown = r.Metrics.Where(m => m.A?.Value is null || m.B?.Value is null)
+                .Select(m => $"{m.Definition.Name}: unknown for {(m.A?.Value is null && m.B?.Value is null ? "both models" : m.A?.Value is null ? "Model A" : "Model B")}").ToList();
+            unknown.AddRange(r.Performance.Where(p => p.A is null || p.B is null)
+                .Select(p => $"{p.Name}: unknown for {(p.A is null && p.B is null ? "both models" : p.A is null ? "Model A" : "Model B")} — {p.Basis}"));
+            if (r.CountsA.Unjudged + r.CountsB.Unjudged > 0) unknown.Add($"Unjudged items: A {r.CountsA.Unjudged.ToString(Inv)}, B {r.CountsB.Unjudged.ToString(Inv)} (quality unknown).");
+            if (r.CountsA.Missing + r.CountsB.Missing > 0) unknown.Add($"Items missing from a run: A {r.CountsA.Missing.ToString(Inv)}, B {r.CountsB.Missing.ToString(Inv)}.");
+            if (a.Revision is null) unknown.Add("Model A version / revision was not recorded.");
+            if (b.Revision is null) unknown.Add("Model B version / revision was not recorded.");
+            if (string.IsNullOrEmpty(r.Dataset.ContentHash)) unknown.Add("Dataset content hash is unknown.");
+            if (unknown.Count == 0) { sb.Append("<p>No values are missing.</p>"); return; }
+            sb.Append("<p>These values were not available. They are shown as “unknown” and were never treated as zero.</p><ul>");
+            foreach (var u in unknown) sb.Append("<li>").Append(H(u)).Append("</li>");
+            sb.Append("</ul>");
+        });
+        Section(24, () =>
         {
             sb.Append("<dl>");
             Dl(sb, "Model A identity", r.A.Result.Model.Key + (r.A.Result.Model.ContentHash is { } ha ? " #" + Short(ha) : ""));
@@ -299,22 +393,44 @@ public static partial class DetailedReportBuilder
             sb.Append("</dl><p class=\"muted\">Reload the same runs and dataset version in Semantic Model Evaluator and apply these settings to reproduce every number. No credentials, keys or storage URLs are recorded.</p>");
             if (!string.IsNullOrWhiteSpace(o.Notes)) sb.Append("<h3>Analyst notes</h3><p>").Append(H(o.Notes)).Append("</p>");
         });
-        Section(20, () =>
+        Section(25, () =>
         {
             var now = DateTimeOffset.Now;
             sb.Append("<p>Report generated: <time datetime=\"").Append(H(now.ToString("O", Inv))).Append("\">").Append(H(now.ToString("yyyy-MM-dd HH:mm:ss zzz", Inv))).Append("</time></p>")
               .Append("<p>Comparison computed: <time datetime=\"").Append(H(r.GeneratedAt.ToString("O", Inv))).Append("\">").Append(H(r.GeneratedAt.ToString("yyyy-MM-dd HH:mm:ss zzz", Inv))).Append("</time></p>");
         });
-        Section(21, () =>
-        {
-            var plus = o.ApplicationVersion.IndexOf('+');
-            sb.Append("<p>Semantic_ModelEvaluator_Kapil_V0 ").Append(H(plus > 0 ? o.ApplicationVersion[..plus] : o.ApplicationVersion)).Append("</p>")
-              .Append("<p>Source commit: ").Append(plus > 0 ? "<code>" + H(o.ApplicationVersion[(plus + 1)..]) + "</code>" : "not recorded (built outside a git repository)").Append("</p>");
-        });
-        sb.Append("</main>\n<footer class=\"muted\">Self-contained report — no external resources. Values marked “unknown” were not available and were not treated as zero.</footer>\n")
-          .Append(FilterScript).Append("</body>\n</html>\n");
+        var plus = o.ApplicationVersion.IndexOf('+');
+        Section(26, () => sb.Append("<p>Semantic_ModelEvaluator_Kapil_V0 ").Append(H(plus > 0 ? o.ApplicationVersion[..plus] : o.ApplicationVersion)).Append("</p>"));
+        Section(27, () => sb.Append("<p>Source commit: ").Append(plus > 0 ? "<code>" + H(o.ApplicationVersion[(plus + 1)..]) + "</code>" : "not recorded (built outside a git repository)").Append("</p>"));
+        Section(28, () => sb.Append("<p>Report schema version <code>").Append(SchemaVersion).Append("</code> (28 sections). Section numbers and titles are stable within a schema version.</p>"));
+
+        for (int n = 1; n <= titles.Length; n++)
+            sb.Append("<section id=\"s").Append(n).Append("\" aria-labelledby=\"h").Append(n).Append("\"><details open><summary><h2 id=\"h").Append(n).Append("\">")
+              .Append(n).Append(". ").Append(titles[n - 1]).Append("</h2></summary>\n").Append(parts[n]?.ToString() ?? "<p>No content.</p>").Append("</details></section>\n");
+        sb.Append("</main>\n<footer class=\"muted\">Self-contained report (schema ").Append(SchemaVersion).Append(") — no external resources. Values marked “unknown” were not available and were not treated as zero.</footer>\n")
+          .Append(FilterScript).Append(SortScript).Append("</body>\n</html>\n");
         return sb.ToString();
     }
+
+    public const string SchemaVersion = "2.0";
+
+    private static string U(string? s) => string.IsNullOrWhiteSpace(s) ? "unknown" : s;
+    private static string Join(string? x, string? y) => string.Join(" / ", new[] { x, y }.Where(s => !string.IsNullOrWhiteSpace(s))) is { Length: > 0 } j ? j : "unknown";
+    private static string Share(int part, int total) => total == 0 ? "unknown" : (part / (double)total).ToString("0.0%", Inv);
+    private static string Execution(PairSide s) => s.Result.Execution.ToString();
+    private static string Fingerprint(Pairing.ModelConfiguration c) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(c.Fingerprint)))[..16].ToLowerInvariant();
+    private static string Provenance(Pairing.ModelConfiguration c)
+    {
+        var src = c.Parameters.GetValueOrDefault("source");
+        if (!string.IsNullOrWhiteSpace(src)) return src;
+        return c.ProviderId switch
+        {
+            "huggingface" => $"Hugging Face model card: huggingface.co/{c.ModelId}",
+            _ => "not recorded"
+        };
+    }
+    private static void Row2(StringBuilder sb, string k, string v) => sb.Append("<tr><th scope=\"row\">").Append(H(k)).Append("</th><td>").Append(H(v)).Append("</td></tr>");
 
     private static string Origin(ResultOrigin o) => o switch
     {
@@ -333,7 +449,7 @@ public static partial class DetailedReportBuilder
         var c = s.Configuration;
         sb.Append("<dl>");
         Dl(sb, "Display name", c.DisplayName); Dl(sb, "Provider", c.ProviderName); Dl(sb, "Model", c.ModelId);
-        Dl(sb, "Version / revision", c.Revision ?? "unknown"); Dl(sb, "Endpoint", c.Endpoint ?? "n/a");
+        Dl(sb, "Version / revision", c.Revision ?? "unknown"); Dl(sb, "Endpoint", c.Endpoint is null ? "n/a (local or captured)" : "configured (value not exported)");
         Dl(sb, "Parameters", Params(c)); Dl(sb, "Status", s.Result.Status.ToString());
         if (s.Result.IsSynthetic) Dl(sb, "Note", "Synthetic baseline — not real model performance");
         sb.Append("</dl>");
@@ -524,6 +640,44 @@ public static partial class DetailedReportBuilder
       rows.forEach(r => { r.hidden = key !== "all" && !(r.getAttribute("data-keys") || "").split(" ").includes(key); });
     }));
     window.addEventListener("beforeprint", () => document.querySelectorAll("details").forEach(d => d.open = true));
+    document.querySelectorAll("[data-expand]").forEach(b => b.addEventListener("click", () => {
+      const open = b.getAttribute("data-expand") === "1";
+      document.querySelectorAll("main > section > details").forEach(d => d.open = open);
+    }));
+  })();
+</script>
+
+""";
+
+    // Turns every column header of a data table into a keyboard-accessible sort button. Rows are reordered in place; unknown values sort last.
+    private const string SortScript = """
+<script>
+  (() => {
+    const num = t => { const m = t.replace(/[−–]/g, "-").match(/^[▲▼●·\s]*[+-]?\d+(\.\d+)?/); return m ? parseFloat(m[0].replace(/[▲▼●·\s]/g, "")) : null; };
+    document.querySelectorAll("main table").forEach(table => {
+      const head = table.tHead, body = table.tBodies[0];
+      if (!head || !body || body.rows.length < 2) return;
+      Array.from(head.rows[0].cells).forEach((th, col) => {
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "sort"; button.textContent = th.textContent;
+        button.setAttribute("aria-label", "Sort by " + th.textContent);
+        th.textContent = ""; th.appendChild(button); th.setAttribute("aria-sort", "none");
+        button.addEventListener("click", () => {
+          const asc = th.getAttribute("aria-sort") !== "ascending";
+          Array.from(head.rows[0].cells).forEach(c => c.setAttribute("aria-sort", "none"));
+          th.setAttribute("aria-sort", asc ? "ascending" : "descending");
+          const key = r => { const c = r.cells[col]; return c ? c.textContent.trim() : ""; };
+          const rows = Array.from(body.rows).sort((x, y) => {
+            const a = key(x), b = key(y), na = num(a), nb = num(b);
+            const ua = a === "" || a === "unknown" || a === "—", ub = b === "" || b === "unknown" || b === "—";
+            if (ua !== ub) return ua ? 1 : -1;
+            const d = na !== null && nb !== null ? na - nb : a.localeCompare(b);
+            return asc ? d : -d;
+          });
+          rows.forEach(r => body.appendChild(r));
+        });
+      });
+    });
   })();
 </script>
 
@@ -631,8 +785,17 @@ figure { margin: 8px 0; } figcaption { color: var(--cp-text-muted); font-size: 1
 .scroll { overflow-x: auto; }
 #items img { max-width: 96px; max-height: 72px; display: block; margin-bottom: 4px; border-radius: 4px; }
 footer { font-size: 12px; }
+section > details > summary { cursor: pointer; list-style-position: outside; }
+section > details > summary h2 { display: inline; }
+.toc-actions button, th button.sort { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+.toc-actions button { color: var(--cp-link); text-decoration: underline; }
+th button.sort { font-weight: 600; }
+th[aria-sort="ascending"] button.sort::after { content: " ▲"; } th[aria-sort="descending"] button.sort::after { content: " ▼"; }
+button:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px solid var(--cp-accent); outline-offset: 2px; }
+td.st-pass, td.st-note { font-weight: 600; } td.st-warning { font-weight: 600; color: var(--cp-text); background: color-mix(in srgb, var(--cp-warning) 20%, transparent); }
+td.st-blocked { font-weight: 600; background: color-mix(in srgb, var(--cp-danger) 20%, transparent); }
 @media print {
-  body { background: var(--cp-surface); } .toc, .filters { display: none; }
+  body { background: var(--cp-surface); } .toc, .filters, .toc-actions { display: none; }
   section { box-shadow: none; border-color: var(--cp-border-strong); }
   #items tr[hidden] { display: table-row; }
 }

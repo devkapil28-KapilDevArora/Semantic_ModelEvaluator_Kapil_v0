@@ -91,6 +91,19 @@ public class WorkbenchTests
     }
 
     [Fact]
+    public void Dataset_hub_is_reachable_without_comparison_results()
+    {
+        var path = System.IO.Path.GetFullPath(System.IO.Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
+            "src", "SemanticModelEvaluator.App", "MainWindow.xaml"));
+        var document = XDocument.Load(path);
+        var hub = document.Descendants().Single(e => (string?)e.Attribute("AutomationProperties.AutomationId") == "DatasetHubTab");
+        Assert.Equal("MainNavigation", (string?)hub.Parent?.Attribute("AutomationProperties.AutomationId"));
+        Assert.DoesNotContain(hub.Ancestors(), e => (string?)e.Attribute("AutomationProperties.AutomationId") == "PairResults");
+        var browse = document.Descendants().Single(e => (string?)e.Attribute("AutomationProperties.AutomationId") == "PairBrowseDatasets");
+        Assert.DoesNotContain(browse.Ancestors(), e => (string?)e.Attribute("AutomationProperties.AutomationId") == "PairResults");
+    }
+
+    [Fact]
     public void Required_UI_actions_have_unique_automation_identifiers()
     {
         var path = System.IO.Path.GetFullPath(System.IO.Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",

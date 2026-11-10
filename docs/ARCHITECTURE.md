@@ -97,13 +97,13 @@ Dependency rule: `App → Providers → Core`; `Core` never references ONNX, WPF
 
 | Concern | Component |
 |---|---|
-| Provider adapters | `Providers/FoundryProvider` (Entra ID via `Azure/AzureAuth` DefaultAzureCredential, or Credential-Manager API key; transient-only retry, 401/403 → `AccessDeniedException`, usage + correlation ids), `PsapiProvider` (captured-run discovery; live invocation blocked — no documented contract), `HuggingFaceProvider`, `LocalOnnxProvider` |
+| Provider adapters | `Providers/FoundryProvider` (Entra ID via `Azure/AzureAuth` DefaultAzureCredential, or Credential-Manager API key; transient-only retry, 401/403 → `AccessDeniedException`, usage + correlation ids), `PsapiProvider` (four-model catalog from the authoritative backend; `PsapiBackendStatus.Probe` finds the CLI, backend, package versions and git head; `PsapiJob` builds a job with only documented parameters and blocks the wrong dataset modality; the run executes through `EvalKitCli.RunJobAsync`), `HuggingFaceProvider` (`IsSemanticSearchModel` filters the pair selector), `LocalOnnxProvider` |
 | Model configuration | `Core/Pairing/PairComparison.cs`: `ModelConfiguration` (provider-neutral; provider metadata kept in `Parameters`), `PairSelection` (cross-provider pairs, identical-config rejection) |
 | EvalKit results | `Core/EvalKit/EvalKitFormat` (metrics envelope v3, query-results JSONL, dataset manifest with sha256 checks), `Providers/EvalKit/EvalKitCloud.cs` (`EvalKitCloudService`, `IResultContainer`, AzureCliCredential only, sensitive opt-in without fallback, `VerifyBundle`; `EvalKitCli`) |
 | Version validation | `PairComparer.Compare` blocks dataset name/version/payload-hash mismatches per side |
 | Orchestration | `EvaluationEngine` (bounded concurrency, item-specific retry with consecutive-failure cap, partial results) |
-| Metrics / comparison | `MetricRegistry`, `ThresholdEngine`, `PairComparer` (rows, outcomes, counts, curves, recommendation, limitations) |
-| Report | `Core/Export/DetailedReportBuilder` (21 sections, CSP, inline SVG with text tables, encoded/redacted, sensitive confirmation) |
+| Metrics / comparison | `MetricRegistry`, `ThresholdEngine`, `PairComparer` (rows, outcomes, counts, curves, MAP@K, rank-only `PairAgreement`, `AssessCompatibility` checks, P50/P95/P99 latency with minimum sample counts, recommendation, limitations) |
+| Report | `Core/Export/DetailedReportBuilder` (28 fixed sections, schema `2.0`, CSP, inline SVG with text tables, sortable tables, encoded/redacted, endpoint values never exported, sensitive confirmation) |
 | UI state | `App/ViewModels/PairComparisonViewModel` (dataset container choice, inclusion rule, dimensions, sample limit), `PairSideViewModel` (batch metadata, connection/validation status) |
 | Security | `Core/Security/Security.cs` (`Redactor` incl. `RedactValue`/`IsSecretName` for credential-named parameters, `AppLog` with correlation ids and no payloads, `NetworkPolicy`) |
 | Dataset containers | `Providers/EvalKit/EvalKitCloud.cs` `EvalKitDatasetContainer` (published/working × sensitivity, blob prefix) and `EvalKitCli.FetchEnvironment` (headless, pinned container, no fallback) |
@@ -111,7 +111,7 @@ Dependency rule: `App → Providers → Core`; `Core` never references ONNX, WPF
 
 Comparison scope order in `PairComparer.Compare`: eligibility on the full dataset → restrict to `SampledIds` → judged-only inclusion rule → metric dimensions (quality excluded ⇒ no per-item winners) → rows, counts, curves, recommendation. Retry policy: `EvaluationEngine.IsItemSpecific` only for HTTP 400/413/422.
 
-Contract sources: EvalKit file formats, storage defaults and the Foundry `/openai/v1/embeddings` pattern were derived from the authorized local checkout `ASG-SearchPlatform` (EvalKit.Viewer, EvalKit.CLI, DataPipelines). No PSAPI endpoint/auth contract was found, so none is implemented.
+Contract sources: EvalKit file formats, storage defaults and the Foundry `/openai/v1/embeddings` pattern were derived from the authorized local checkout `ASG-SearchPlatform` (EvalKit.Viewer, EvalKit.CLI, DataPipelines). PSAPI is the EvalKit external backend `ExternalBackends/psapi-embeddings-backend` (JSON-RPC over stdio, protocol 2, no runtime auth); its evidence and open questions are in [PSAPI_DISCOVERY.md](PSAPI_DISCOVERY.md). No hosted PSAPI endpoint was found, so none is implemented.
 
 **Data flow.** Provider → `ModelDescriptor` → `EvaluationEngine` loads a runner → embeddings (cached on disk by model-hash + text-hash) → exact cosine top-N per query → `ModelRunResult` (IDs + scores + latencies, *no dataset text*) → persisted after each model. `ThresholdEngine` recomputes metrics from those cached scores; inference is never re-run for threshold or K changes.
 

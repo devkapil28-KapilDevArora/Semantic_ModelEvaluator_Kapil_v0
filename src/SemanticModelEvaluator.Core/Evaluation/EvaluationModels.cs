@@ -76,6 +76,7 @@ public sealed class ModelRunResult
     public int FailedItems { get; set; }
     /// <summary>True when some or all scores are −rank because the source recorded positions only; thresholds then act as rank cut-offs.</summary>
     public bool ScoresIncludeRanks { get; set; }
+    public Dictionary<string, string> Provenance { get; set; } = [];
 
     [JsonIgnore] public bool HasResults => Queries.Count > 0 || Examples.Count > 0;
 

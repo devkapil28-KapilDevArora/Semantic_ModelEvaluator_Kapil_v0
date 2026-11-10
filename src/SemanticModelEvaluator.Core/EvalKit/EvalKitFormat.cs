@@ -56,6 +56,11 @@ public sealed class EvalKitRun
     public string? Experiment { get; init; }
     public string? PsApiVersion { get; init; }
     public string? Model { get; init; }
+    /// <summary>From evalkit.effective_config.parameters (reported by the backend itself, e.g. the PSAPI backend's model_id / model_version).</summary>
+    public string? BackendModelId { get; init; }
+    public string? BackendModelVersion { get; init; }
+    public int? BackendDimension { get; init; }
+    public string? BackendDevice { get; init; }
     public string? SourceDescription { get; init; }
     public string Classification { get; init; } = "Unclassified (local EvalKit output)";
     public List<string> Warnings { get; } = [];
@@ -64,9 +69,11 @@ public sealed class EvalKitRun
     public string ProviderLabel => PsApiVersion is not null ? "PSAPI" : "EvalKit backend";
     /// <summary>Prefix of the model id used when a run records no model name. The run name is shown as provenance only, never as the model.</summary>
     public const string UnknownModelPrefix = "unknown-model";
-    /// <summary>Model name recorded by the bundle manifest; otherwise explicitly unknown (never the run name or backend presented as the model).</summary>
-    public string ModelLabel => Model ?? $"{UnknownModelPrefix} (run '{Name}')";
-    public string RevisionLabel => PsApiVersion is not null ? "psapi-" + PsApiVersion : BackendVersion is not null ? "backend-" + BackendVersion : "unknown";
+    /// <summary>Model name recorded by the bundle manifest or reported by the backend; otherwise explicitly unknown (never the run name or backend presented as the model).</summary>
+    public string ModelLabel => Model ?? BackendModelId ?? $"{UnknownModelPrefix} (run '{Name}')";
+    public string RevisionLabel => PsApiVersion is not null ? "psapi-" + PsApiVersion
+        : BackendModelVersion is not null ? "model " + BackendModelVersion
+        : BackendVersion is not null ? "backend-" + BackendVersion : "unknown";
 
     /// <summary>Model identity only. The run id is provenance (tracked separately), so two runs of the same model/version are the same configuration.</summary>
     public ModelIdentity Identity => new(PsApiVersion is not null ? "psapi" : "evalkit", ModelLabel, RevisionLabel);
@@ -76,6 +83,8 @@ public sealed class EvalKitRun
         $"batch/experiment {Experiment ?? "not recorded (local output)"} · run {(RunId.Length > 0 ? RunId : "?")} '{Name}'" +
         $" · created {CreatedAt?.ToString("u", System.Globalization.CultureInfo.InvariantCulture) ?? "unknown"}" +
         $" · EvalKit {EvalKitVersion ?? "unknown"} · backend {Backend ?? "unknown"} {BackendVersion ?? ""}".TrimEnd() +
+        (BackendModelId is null ? "" : $" · backend-reported model {BackendModelId} {BackendModelVersion ?? ""}".TrimEnd() +
+            (BackendDimension is { } dim ? $", {dim}-d" : "") + (BackendDevice is { } dev ? $", {dev}" : "")) +
         $" · queries {QueryCount}, judged {JudgedCount}, zero-result {ZeroResultCount}, failed {FailedQueryCount}" +
         $" · depth {MaxResultsPerQuery?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unknown"}";
 }
@@ -108,6 +117,7 @@ public static class EvalKitFormat
         var inputs = root["inputs"] as JsonObject;
         var evalkit = root["evalkit"] as JsonObject;
         var config = evalkit?["config"] as JsonObject;
+        var effective = evalkit?["effective_config"]?["parameters"] as JsonObject;
         var description = root["description"] as JsonObject;
         var run = new EvalKitRun
         {
@@ -131,10 +141,14 @@ public static class EvalKitFormat
             Experiment = Str(resultManifest?["experiment"]),
             PsApiVersion = Str(resultManifest?["psapi_version"]),
             Model = Str(resultManifest?["model"]),
+            BackendModelId = Str(effective?["model_id"]),
+            BackendModelVersion = Str(effective?["model_version"]),
+            BackendDimension = Int(effective?["dimension"]),
+            BackendDevice = Str(effective?["device"]),
             Classification = classification ?? "Unclassified (local EvalKit output)"
         };
         if (run.Dataset.PayloadHash is null) run.Warnings.Add("Metrics envelope has no inputs.dataset_payload_hash; exact dataset matching is impossible.");
-        if (run.Model is null)
+        if (run.Model is null && run.BackendModelId is null)
             run.Warnings.Add($"No model name is recorded (no result-manifest.json); the run name '{run.Name}' identifies the model and backend '{run.Backend ?? "unknown"}' " +
                 $"{run.BackendVersion ?? ""} is the revision. Verify the identity before drawing conclusions.");
         return run;
@@ -168,8 +182,11 @@ public static class EvalKitFormat
     /// <summary>
     /// Streams query-results JSONL rows {query_id, document_id, position (1-based), score?} into cached results.
     /// Rows without a score use −position so ordering is preserved; this is flagged because score thresholds become rank cut-offs.
+    /// The JSONL has no rows for queries that returned nothing. When <paramref name="expectedQueryIds"/> is given and the envelope
+    /// records no failed queries, those queries are added as empty results (they count as misses, not failures). EvalKit records
+    /// only failure counts, not ids, so with failures present they stay unknown and a warning explains why.
     /// </summary>
-    public static ModelRunResult ReadResults(EvalKitRun run, int retainDepth = 1000, CancellationToken ct = default)
+    public static ModelRunResult ReadResults(EvalKitRun run, int retainDepth = 1000, CancellationToken ct = default, IReadOnlyCollection<string>? expectedQueryIds = null)
     {
         var path = ResolveQueryResults(run.MetricsPath);
         var byQuery = new Dictionary<string, List<(int Position, ScoredDocument Doc)>>(StringComparer.Ordinal);
@@ -207,6 +224,19 @@ public static class EvalKitFormat
             });
         }
         if (invalid > 0) { result.Warnings.Add($"{invalid} of {line} result rows were invalid and skipped."); result.Status = RunStatus.CompletedWithErrors; }
+        if (expectedQueryIds is not null)
+        {
+            var absent = expectedQueryIds.Where(id => !byQuery.ContainsKey(id)).Distinct(StringComparer.Ordinal).ToList();
+            if (absent.Count > 0 && run.FailedQueryCount == 0)
+            {
+                foreach (var id in absent) result.Queries.Add(new QueryResult { QueryId = id, Results = [] });
+                if (absent.Count != run.ZeroResultCount)
+                    result.Warnings.Add($"{absent.Count} dataset queries have no result rows, but EvalKit recorded {run.ZeroResultCount} zero-result queries; they were treated as empty. Check that the run and dataset match.");
+            }
+            else if (absent.Count > 0)
+                result.Warnings.Add($"{absent.Count} dataset queries have no result rows and EvalKit recorded {run.FailedQueryCount} failed and {run.ZeroResultCount} zero-result queries " +
+                    "without ids, so empty and failed queries cannot be told apart; they are left as missing (unknown).");
+        }
         if (rankOnly > 0) { result.ScoresIncludeRanks = true; result.Warnings.Add($"{rankOnly} result rows had no score; −position is used, so the threshold acts as a rank cut-off for them."); }
         if (run.QueryDurationSeconds is { } secs && run.QueryCount > 0) result.Performance.MeanLatencyMs = secs * 1000 / run.QueryCount;
         result.Warnings.AddRange(run.Warnings);
@@ -233,17 +263,23 @@ public static class EvalKitFormat
 
     /// <summary>
     /// Loads an EvalKit dataset manifest (AsgSearchPlatform.Manifest: description{name,version}, corpus[], queries, judgements, payload_hash).
-    /// Judgement rows are {query_id, document_id, relevance}; relevance &lt; 0 is harmful (EvalKit HarmCount/HarmExposure),
+    /// Judgement rows are {query_id, doc_id, relevance} (document_id accepted for older exports); relevance &lt; 0 is harmful (EvalKit HarmCount/HarmExposure),
     /// relevance ≥ 1 is relevant. Unjudged pairs stay unjudged. Per-file "sha256:" hashes are verified when present.
     /// </summary>
     public static EvalDataset LoadDataset(string manifestPath, string? classification = null, CancellationToken ct = default)
     {
+        if (File.Exists(manifestPath + ".smeval-handling.json"))
+            classification = Str(JsonNode.Parse(File.ReadAllText(manifestPath + ".smeval-handling.json"))?["classification"])
+                ?? throw new InvalidDataException("EvalKit cache handling metadata is invalid.");
         var dir = Path.GetDirectoryName(Path.GetFullPath(manifestPath))!;
         var root = JsonNode.Parse(File.ReadAllText(manifestPath)) as JsonObject ?? throw new InvalidDataException("Manifest is not a JSON object.");
         var description = root["description"] as JsonObject;
         var name = Str(description?["name"]) ?? Str(root["name"]) ?? throw new InvalidDataException("EvalKit manifest has no description.name.");
         var version = Str(description?["version"]) ?? Str(root["version"]) ?? throw new InvalidDataException("EvalKit manifest has no description.version.");
         var payload = Str(root["payload_hash"]) ?? throw new InvalidDataException("EvalKit manifest has no payload_hash; exact run matching is impossible.");
+        classification ??= "Unclassified EvalKit dataset - follow the handling rules of its source container";
+        var provenance = DatasetPolicy.EvalKit(name, classification);
+        DatasetPolicy.Ensure(provenance, DatasetOperation.Preview);
         var issues = new List<Models.ValidationIssue>();
 
         string Ref(JsonNode? fileRef, string what)
@@ -307,7 +343,8 @@ public static class EvalKitFormat
         if (root["judgements"] is JsonObject jref)
             foreach (var o in Rows(Ref(jref, "judgements")))
             {
-                var q = Str(o["query_id"]); var d = Str(o["document_id"]); var rel = Dbl(o["relevance"]);
+                // The authoritative loader (AsgSearchPlatform.Manifest.QueryJudgementLoader) requires doc_id; document_id is accepted for older exports.
+                var q = Str(o["query_id"]); var d = Str(o["doc_id"]) ?? Str(o["document_id"]); var rel = Dbl(o["relevance"]);
                 if (q is null || d is null) continue;
                 // EvalKit: relevance < 0 = harmful; missing relevance = unjudged (never safe or relevant).
                 judgments.Add(rel is { } r ? new Judgment(q, d, Math.Max(0, r), r < 0) : new Judgment(q, d, null, null));
@@ -324,6 +361,7 @@ public static class EvalKitFormat
             DataClassification = classification ?? "Unclassified EvalKit dataset — follow the handling rules of its source container",
             SourcePath = Path.GetFullPath(manifestPath),
             ContentHash = payload,
+            Provenance = provenance,
             Queries = queries,
             Documents = documents,
             Judgments = judgments
@@ -343,6 +381,8 @@ public static class EvalKitFormat
     public static string? FindCachedDataset(EvalKitDatasetIdentity identity, string? cacheRoot = null)
     {
         if (identity.Name is null || identity.Version is null || identity.PayloadHash is null) return null;
+        if (new[] { identity.Name, identity.Version }.Any(s => s.Contains("..") || s.IndexOfAny(['/', '\\', ':']) >= 0))
+            throw new InvalidDataException("Unsafe dataset identity in cache lookup.");
         var folder = Path.Combine(DatasetCacheRoot(cacheRoot), "datasets", identity.Name, "v" + EvalKitDatasetIdentity.NormalizeVersion(identity.Version));
         if (!Directory.Exists(folder)) return null;
         foreach (var manifest in Directory.EnumerateFiles(folder, "*.manifest.json", SearchOption.AllDirectories))

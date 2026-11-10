@@ -110,8 +110,8 @@ public static class EvalKitFixtures
         File.WriteAllText(Path.Combine(folder, "queries.jsonl"), "{\"id\":\"q1\",\"text\":\"reset password\"}\n{\"id\":\"q2\",\"text\":\"vpn\"}\n{\"id\":\"q3\",\"text\":\"printer\"}");
         File.WriteAllText(Path.Combine(folder, "corpus.jsonl"), string.Join("\n", Enumerable.Range(1, 4).Select(i => $"{{\"id\":\"d{i}\",\"text\":\"doc {i}\"}}")));
         File.WriteAllText(Path.Combine(folder, "judgements.jsonl"),
-            "{\"query_id\":\"q1\",\"document_id\":\"d1\",\"relevance\":2}\n{\"query_id\":\"q1\",\"document_id\":\"d2\",\"relevance\":-1}\n" +
-            "{\"query_id\":\"q1\",\"document_id\":\"d3\"}\n{\"query_id\":\"q2\",\"document_id\":\"d3\",\"relevance\":1}");
+            "{\"query_id\":\"q1\",\"doc_id\":\"d1\",\"relevance\":2}\n{\"query_id\":\"q1\",\"doc_id\":\"d2\",\"relevance\":-1}\n" +
+            "{\"query_id\":\"q1\",\"doc_id\":\"d3\"}\n{\"query_id\":\"q2\",\"document_id\":\"d3\",\"relevance\":1}");
         var manifest = Path.Combine(folder, "fx-ek.manifest.json");
         File.WriteAllText(manifest, new JsonObject
         {
@@ -240,20 +240,202 @@ public class ProviderIntegrationTests
     }
 
     [Fact]
-    public async Task Psapi_discovers_captured_runs_but_live_invocation_is_blocked()
+    public async Task Psapi_discovers_the_four_catalog_models_and_captured_runs()
     {
         var folder = Fixtures.NewTempDir();
         File.WriteAllText(Path.Combine(folder, "result-manifest.json"), "{\"model\":\"ranker-x\",\"psapi_version\":\"12\"}");
         var p = new PsapiProvider(() => [(folder, "bundle")]);
         var found = await p.DiscoverAsync(new ModelQuery(), CancellationToken.None);
-        var m = Assert.Single(found);
-        Assert.Equal(ReadinessState.ImportOnly, m.Readiness);
-        Assert.Equal(folder, m.LocalPath);
+        Assert.Equal(["florence", "genoa", "palermo", "ranker-x", "spacev6"], found.Select(m => m.Identity.ModelId).Order());
         Assert.False(p.UsesNetwork);
-        var v = await p.ValidateAsync(m, CancellationToken.None);
+
+        var captured = found.Single(m => m.Identity.ModelId == "ranker-x");
+        Assert.Equal(ReadinessState.ImportOnly, captured.Readiness);
+        Assert.Equal(folder, captured.LocalPath);
+        Assert.True((await p.ValidateAsync(captured, CancellationToken.None)).IsValid);
+
+        // Without a built backend the catalog models are listed honestly as not installed and validation explains what is missing.
+        var genoa = found.Single(m => m.Identity.ModelId == "genoa");
+        Assert.Equal(ReadinessState.NotInstalled, genoa.Readiness);
+        Assert.Equal(ExecutionKind.ExternalProcess, genoa.Execution);
+        var v = await p.ValidateAsync(genoa, CancellationToken.None);
         Assert.False(v.IsValid);
-        Assert.Contains(PsapiProvider.BlockedReason, v.ToString());
-        await Assert.ThrowsAsync<NotSupportedException>(() => p.LoadAsync(m, new RuntimeOptions(), CancellationToken.None));
+        Assert.Contains("EvalKit CLI was not found", v.ToString());
+        await Assert.ThrowsAsync<NotSupportedException>(() => p.LoadAsync(genoa, new RuntimeOptions(), CancellationToken.None));
+    }
+
+    [Fact]
+    public void Psapi_catalog_matches_the_authoritative_backend_contract()
+    {
+        var specs = PsapiProvider.Catalog.ToDictionary(s => s.ModelId);
+        Assert.Equal((PsapiCorpus.Text, 100, 512), (specs["spacev6"].Corpus, specs["spacev6"].Dimensions, specs["spacev6"].MaxInputTokens));
+        Assert.Equal((PsapiCorpus.Text, 768, 512), (specs["palermo"].Corpus, specs["palermo"].Dimensions, specs["palermo"].MaxInputTokens));
+        Assert.Equal((PsapiCorpus.Image, 768, 77), (specs["florence"].Corpus, specs["florence"].Dimensions, specs["florence"].MaxInputTokens));
+        Assert.Equal((PsapiCorpus.Image, 1024, 96), (specs["genoa"].Corpus, specs["genoa"].Dimensions, specs["genoa"].MaxInputTokens));
+        Assert.Equal(["Florence", "Genoa", "Palermo", "Space v6"], PsapiProvider.Catalog.Select(s => s.DisplayName).Order());
+
+        var status = new PsapiBackendStatus("cli.dll", @"C:\repo", @"C:\repo\bin", new Dictionary<string, string> { ["EmbeddingsLookup-Genoa"] = "1.0.521" }, "develop", "abc");
+        var d = PsapiProvider.Describe(specs["genoa"], status);
+        Assert.Equal(ReadinessState.Ready, d.Readiness);
+        Assert.Equal("EmbeddingsLookup-Genoa@1.0.521", d.Identity.Revision);
+        var cfg = ModelConfiguration.From(d);
+        Assert.Equal(("image", "1024", "96"), (cfg.Parameters["corpus_modality"], cfg.Parameters["dimensions"], cfg.Parameters["max_input_tokens"]));
+        Assert.DoesNotContain(cfg.Parameters, p => p.Key.Contains("key", StringComparison.OrdinalIgnoreCase) || p.Key.Contains("token", StringComparison.OrdinalIgnoreCase) && p.Key != "max_input_tokens");
+        Assert.Equal("package version unknown", PsapiProvider.Revision(specs["spacev6"], status));
+    }
+
+    [Fact]
+    public void Psapi_backend_status_explains_each_missing_prerequisite()
+    {
+        var none = new Dictionary<string, string>();
+        Assert.Contains("EvalKit CLI was not found", new PsapiBackendStatus(null, null, null, none, null, null).Summary);
+        Assert.Contains("checkout", new PsapiBackendStatus("cli", null, null, none, null, null).Summary);
+        var notBuilt = new PsapiBackendStatus("cli", @"C:\repo", null, none, null, null);
+        Assert.False(notBuilt.CanRun);
+        Assert.Contains("build.ps1", notBuilt.Summary);
+        Assert.Contains("v145", notBuilt.Summary);
+        Assert.True(new PsapiBackendStatus("cli", @"C:\repo", @"C:\repo\bin", none, "develop", "0123456789abcdef").CanRun);
+    }
+
+    [Fact]
+    public async Task Psapi_contract_failures_block_readiness_and_validation()
+    {
+        const string error = "Unsupported PSAPI contract.";
+        var status = new PsapiBackendStatus("cli", @"C:\repo", @"C:\repo\bin", new Dictionary<string, string>(), "develop", "abc")
+        {
+            ContractError = error
+        };
+        var provider = new PsapiProvider(() => [], () => status);
+        var model = PsapiProvider.Describe(PsapiProvider.Find("spacev6")!, status);
+
+        Assert.False(status.CanRun);
+        Assert.Contains(error, status.Summary);
+        Assert.Equal(ReadinessState.NotInstalled, model.Readiness);
+        Assert.Contains(error, model.ReadinessDetail);
+        var validation = await provider.ValidateAsync(model, CancellationToken.None);
+        Assert.False(validation.IsValid);
+        Assert.Contains(validation.Issues, i => i.Severity == ValidationSeverity.Error && i.Message.Contains(error));
+    }
+
+    [Fact]
+    public void Psapi_registry_preserves_build_identity_when_prerequisites_are_missing()
+    {
+        var root = Fixtures.NewTempDir();
+        var build = new PsapiBuildRegistration
+        {
+            Id = "registered-build", Label = "Registered build",
+            RepositoryRoot = root, CliPath = Path.Combine(root, "missing-cli.dll"),
+            BackendDirectory = Path.Combine(root, "missing-backend")
+        };
+
+        var status = PsapiBuildRegistry.Inspect(build, CancellationToken.None);
+
+        Assert.Equal(build.Id, status.BuildId);
+        Assert.Equal(build.Label, status.BuildLabel);
+        Assert.False(status.CanRun);
+        Assert.NotNull(status.ContractError);
+        Assert.Contains(status.ContractError, status.Summary);
+        Assert.Null(status.Fingerprint);
+        Assert.Null(status.RuntimeVersion);
+        Assert.Empty(status.ModelIssues);
+    }
+
+    [Fact]
+    public void Git_head_is_read_from_loose_and_packed_refs_without_running_git()
+    {
+        var root = Fixtures.NewTempDir();
+        var git = Directory.CreateDirectory(Path.Combine(root, ".git")).FullName;
+        Assert.Equal(((string?)null, (string?)null), PsapiBackendStatus.ReadGitHead(root));
+        File.WriteAllText(Path.Combine(git, "HEAD"), "ref: refs/heads/develop\n");
+        File.WriteAllText(Path.Combine(git, "packed-refs"), "# pack-refs\nfeedface refs/heads/develop\n");
+        Assert.Equal(("develop", "feedface"), PsapiBackendStatus.ReadGitHead(root));
+        Directory.CreateDirectory(Path.Combine(git, "refs", "heads"));
+        File.WriteAllText(Path.Combine(git, "refs", "heads", "develop"), "cafebabe\n");
+        Assert.Equal(("develop", "cafebabe"), PsapiBackendStatus.ReadGitHead(root));
+        File.WriteAllText(Path.Combine(git, "HEAD"), "0123abcd");
+        Assert.Equal(((string?)null, (string?)"0123abcd"), PsapiBackendStatus.ReadGitHead(root));
+    }
+
+    [Fact]
+    public void Psapi_job_uses_only_documented_parameters_and_absolute_paths()
+    {
+        var spec = PsapiProvider.Find("SpaceV6")!;
+        var job = PsapiJob.Build(spec, "ds\\x.manifest.json", "pkg", 50, "SMEval_run");
+        Assert.True(Path.IsPathFullyQualified(job["manifestPath"]!.GetValue<string>()));
+        Assert.True(Path.IsPathFullyQualified(job["backend"]!["package"]!.GetValue<string>()));
+        Assert.Equal("external", job["backend"]!["type"]!.GetValue<string>());
+        var parameters = job["backend"]!["parameters"]!.AsObject();
+        Assert.Equal(["modelId"], parameters.Select(p => p.Key));
+        Assert.Equal("spacev6", parameters["modelId"]!.GetValue<string>());
+        Assert.Equal(50, job["queryConfig"]!["maxResultsPerQuery"]!.GetValue<int>());
+        Assert.False(job["failFast"]!.GetValue<bool>());
+        Assert.Null(job["hostPrepare"]);
+        Assert.Equal("filename", PsapiJob.Build(spec, "m", "p", 5, "n", "filename")["backend"]!["parameters"]!["textSource"]!.GetValue<string>());
+        Assert.Throws<ArgumentException>(() => PsapiJob.Build(PsapiProvider.Find("genoa")!, "m", "p", 5, "n", "filename"));
+        Assert.Throws<ArgumentException>(() => PsapiJob.Build(spec, "m", "p", 5, "n", "url"));
+        Assert.Throws<ArgumentOutOfRangeException>(() => PsapiJob.Build(spec, "m", "p", 0, "n"));
+        Assert.Matches("^SMEval_spacev6_My_data_v1_\\d{14}$", PsapiJob.RunName(spec, "My data/v1!", DateTimeOffset.UnixEpoch.AddYears(55)));
+    }
+
+    [Fact]
+    public void Psapi_dataset_check_blocks_wrong_modality_and_non_evalkit_sources()
+    {
+        var root = Fixtures.NewTempDir();
+        var manifest = EvalKitFixtures.WriteDataset(Path.Combine(root, "ds"));
+        var text = EvalKitFormat.LoadDataset(manifest, "Synthetic test data");
+        Assert.Empty(PsapiJob.CheckDataset(PsapiProvider.Find("spacev6")!, text));
+        Assert.Contains(PsapiJob.CheckDataset(PsapiProvider.Find("genoa")!, text), e => e.Contains("IMAGE corpus"));
+        var images = new EvalDataset
+        {
+            Id = text.Id, Name = text.Name, Version = text.Version, Task = EvalTask.Retrieval, SourcePath = manifest, Queries = text.Queries,
+            Documents = [new("i1", "", "a.jpg"), new("i2", "", "b.jpg")], Judgments = text.Judgments
+        };
+        Assert.Empty(PsapiJob.CheckDataset(PsapiProvider.Find("florence")!, images));
+        Assert.Contains(PsapiJob.CheckDataset(PsapiProvider.Find("palermo")!, images), e => e.Contains("TEXT corpus"));
+        Assert.Contains(PsapiJob.CheckDataset(PsapiProvider.Find("spacev6")!, Fixtures.Retrieval()), e => e.Contains("EvalKit dataset manifest"));
+        Assert.Equal("inlineText", PsapiJob.TextSource(PsapiProvider.Find("spacev6")!, text));
+    }
+
+    [Fact]
+    public void Evalkit_run_arguments_use_absolute_paths_and_force()
+    {
+        var args = EvalKitCli.RunArguments("job.json", "out");
+        Assert.Equal("run", args[0]);
+        Assert.True(Path.IsPathFullyQualified(args[1]));
+        Assert.Equal("--output-dir", args[2]);
+        Assert.True(Path.IsPathFullyQualified(args[3]));
+        Assert.Equal("--force", args[4]);
+    }
+
+    [Fact]
+    public void Backend_reported_model_identity_is_read_from_effective_config()
+    {
+        var root = Fixtures.NewTempDir();
+        var path = EvalKitFixtures.WriteRun(root, "runP", EvalKitFixtures.Results(("q1", "d1", 1, 0.9)));
+        var json = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        json["evalkit"]!["effective_config"] = new JsonObject
+        {
+            ["parameters"] = new JsonObject { ["model_id"] = "palermo", ["model_version"] = "text: 2.0.0", ["dimension"] = 768, ["device"] = "CPU" }
+        };
+        json["host_machine_info"] = new JsonObject { ["machine_name"] = "SECRET-HOST" };
+        File.WriteAllText(path, json.ToJsonString());
+        var run = EvalKitFormat.ReadRun(path);
+        Assert.Equal(("palermo", "text: 2.0.0", 768, "CPU"), (run.BackendModelId, run.BackendModelVersion, run.BackendDimension, run.BackendDevice));
+        Assert.DoesNotContain("SECRET-HOST", run.BatchMetadata);
+    }
+
+    [Fact]
+    public void Semantic_search_selector_excludes_generation_classification_and_reranking_models()
+    {
+        ModelDescriptor D(Modality output, params EvalTask[] tasks) => new()
+        {
+            Identity = new ModelIdentity(HuggingFaceProvider.ProviderId, "m", "1"), DisplayName = "m", Tasks = [.. tasks], OutputModality = output
+        };
+        Assert.True(HuggingFaceProvider.IsSemanticSearchModel(D(Modality.Embedding, EvalTask.Retrieval, EvalTask.SemanticSimilarity)));
+        Assert.False(HuggingFaceProvider.IsSemanticSearchModel(D(Modality.Label, EvalTask.Generative)));
+        Assert.False(HuggingFaceProvider.IsSemanticSearchModel(D(Modality.Label, EvalTask.Classification)));
+        Assert.False(HuggingFaceProvider.IsSemanticSearchModel(D(Modality.Label, EvalTask.Reranking)));
+        Assert.False(HuggingFaceProvider.IsSemanticSearchModel(D(Modality.Embedding)));
     }
 }
 
@@ -579,6 +761,45 @@ public class EvalKitAndPairComparisonTests
         Assert.Contains("consecutive item failures", run.Models[0].Error);
         Assert.Equal(1 + EvaluationEngine.MaxConsecutiveItemFailures, calls); // one batch call + capped per-item retries, not 40
     }
+
+    [Fact]
+    public void Queries_without_result_rows_are_empty_when_evalkit_recorded_no_failures()
+    {
+        var root = Fixtures.NewTempDir();
+        // Envelope: 3 queries, zero_result_count 1, failed 0. Only q3 has no rows.
+        var ek = EvalKitFormat.ReadRun(EvalKitFixtures.WriteRun(root, "runZ", EvalKitFixtures.Results(("q1", "d1", 1, 0.9), ("q2", "d3", 1, 0.8))));
+        var withoutIds = EvalKitFormat.ReadResults(ek);
+        Assert.DoesNotContain(withoutIds.Queries, q => q.QueryId == "q3");
+        var r = EvalKitFormat.ReadResults(ek, expectedQueryIds: ["q1", "q2", "q3"]);
+        var q3 = r.Queries.Single(q => q.QueryId == "q3");
+        Assert.Empty(q3.Results); Assert.Null(q3.Error);
+        Assert.DoesNotContain(r.Warnings, w => w.Contains("dataset queries have no result rows"));
+        // A count that disagrees with the envelope is still treated as empty but flagged.
+        Assert.Contains(EvalKitFormat.ReadResults(ek, expectedQueryIds: ["q1", "q2", "q3", "q4"]).Warnings, w => w.Contains("recorded 1 zero-result"));
+    }
+
+    [Fact]
+    public void Queries_without_result_rows_stay_unknown_when_failures_cannot_be_told_apart()
+    {
+        var root = Fixtures.NewTempDir();
+        var metrics = EvalKitFixtures.WriteRun(root, "runF", EvalKitFixtures.Results(("q1", "d1", 1, 0.9)));
+        File.WriteAllText(metrics, File.ReadAllText(metrics).Replace("\"failed_query_count\":0", "\"failed_query_count\":1"));
+        var r = EvalKitFormat.ReadResults(EvalKitFormat.ReadRun(metrics), expectedQueryIds: ["q1", "q2", "q3"]);
+        Assert.Single(r.Queries);
+        Assert.Contains(r.Warnings, w => w.Contains("cannot be told apart"));
+    }
+
+    [Fact]
+    public void Psapi_provenance_reaches_the_configuration_and_the_report()
+    {
+        var status = new PsapiBackendStatus("cli", "root", "pkg", new Dictionary<string, string>(), "develop", "feedface0123456789");
+        var cfg = ModelConfiguration.From(PsapiProvider.Describe(PsapiProvider.Find("spacev6")!, status));
+        Assert.Equal("feedface0123456789", cfg.Parameters["source_commit"]);
+        Assert.Contains("psapi-embeddings-backend", cfg.Parameters["source"]);
+        Assert.Equal("evalkit run (external backend, local CPU)", cfg.Parameters["invocation"]);
+        var other = ModelConfiguration.From(PsapiProvider.Describe(PsapiProvider.Find("spacev6")!, status with { SourceCommit = "0000" }));
+        Assert.NotEqual(cfg.Fingerprint, other.Fingerprint);
+    }
 }
 
 public class EvalKitCloudTests
@@ -690,6 +911,80 @@ public class DetailedReportTests
     }
 
     [Fact]
+    public void Agreement_uses_ranks_only_and_matches_hand_computed_values()
+    {
+        var r = Result(Dataset("Public synthetic", "alpha"));
+        var g = r.Agreement!;
+        // q1: A {d2,d1,d4} vs B {d1,d3,d2} → 2/4; q2: {d5} vs {d3} → 0; q3: {d1} vs {} → 0.
+        Assert.Equal(3, g.Queries);
+        Assert.Equal(0.5 / 3, g.MeanTopKOverlap!.Value, 6);
+        // Spearman: q1 ρ = 0, q2 ρ = −1, q3 skipped (union of one document).
+        Assert.Equal(2, g.RankCorrelationQueries);
+        Assert.Equal(-0.5, g.MeanRankCorrelation!.Value, 6);
+        Assert.Equal((1, 3, 1, 0, 2), (g.RelevantA, g.RelevantB, g.RelevantBoth, g.RelevantMissedByB, g.RelevantMissedByA));
+        Assert.False(r.RawScoresComparable); // different models: raw scores are never compared
+    }
+
+    [Fact]
+    public void Map_at_k_is_reported_and_matches_hand_computed_values()
+    {
+        var r = Result(Dataset("Public synthetic", "alpha"));
+        var map = r.Metrics.Single(m => m.Definition.Id == "map_at_k");
+        // A: q1 relevant at rank 2 (d1) → (1/2)/min(2,3) = 0.25; q2 none → 0. Mean 0.125. B: q1 d1@1, d3@2 → (1+1)/2 = 1; q2 d3@1 → 1. Mean 1.
+        Assert.Equal(0.125, map.A!.Value!.Value, 6);
+        Assert.Equal(1.0, map.B!.Value!.Value, 6);
+        Assert.Equal("B", map.Better);
+    }
+
+    [Fact]
+    public void Latency_percentiles_stay_unknown_without_enough_samples()
+    {
+        Assert.Null(PairComparer.Percentile([1, 2, 3], 50, 5));
+        Assert.Equal(3, PairComparer.Percentile([5, 1, 4, 2, 3], 50, 5));
+        var many = Enumerable.Range(1, 100).Select(i => (double)i).ToList();
+        Assert.Equal(95, PairComparer.Percentile(many, 95, 20));
+        Assert.Equal(99, PairComparer.Percentile(many, 99, 100));
+        var r = Result(Dataset("Public synthetic", "alpha"));
+        Assert.All(r.Performance.Where(p => p.Name.StartsWith('P')), p => { Assert.Null(p.A); Assert.Null(p.B); });
+    }
+
+    [Fact]
+    public void Compatibility_checks_cover_dataset_modality_scale_and_truncation()
+    {
+        var ds = Dataset("Public synthetic", "alpha");
+        var a = Fixtures.RetrievalRunA(); var b = Fixtures.RetrievalRunB();
+        var cfgA = ModelConfiguration.From(a, "PSAPI", new Dictionary<string, string> { ["corpus_modality"] = "text", ["max_input_tokens"] = "512", ["dimensions"] = "100" });
+        var cfgB = ModelConfiguration.From(b, "PSAPI", new Dictionary<string, string> { ["corpus_modality"] = "image", ["max_input_tokens"] = "77", ["dimensions"] = "768" });
+        var r = Comparer.Compare(ds,
+            new PairSide { Configuration = cfgA, Result = a, RunDataset = ds.ToReference() },
+            new PairSide { Configuration = cfgB, Result = b, RunDataset = ds.ToReference() }, new PairSettings { K = 3 }, includeText: false);
+        CompatibilityStatus S(string aspect) => r.Compatibility.Single(c => c.Aspect == aspect).Status;
+        Assert.Equal(CompatibilityStatus.Pass, S("Same dataset and exact version"));
+        Assert.Equal(CompatibilityStatus.Warning, S("Modality"));
+        Assert.Equal(CompatibilityStatus.Note, S("Score scale and direction"));
+        Assert.Equal(CompatibilityStatus.Note, S("Truncation / input limit"));
+        Assert.Equal(CompatibilityStatus.Unknown, S("Same candidate limit"));
+        var html = DetailedReportBuilder.Build(r, new DetailedReportOptions());
+        Assert.Contains("⚠ Warning", html);
+        Assert.Contains("Mean top-K overlap", html);
+
+        var mismatched = Comparer.Compare(ds,
+            new PairSide { Configuration = cfgA, Result = a, RunDataset = ds.ToReference() with { Version = "2.0" } },
+            new PairSide { Configuration = cfgB, Result = b, RunDataset = ds.ToReference() }, new PairSettings { K = 3 }, includeText: false);
+        Assert.Equal(CompatibilityStatus.Blocked, mismatched.Compatibility.Single(c => c.Aspect == "Same dataset and exact version").Status);
+        Assert.False(mismatched.IsComparable);
+    }
+
+    [Fact]
+    public void Report_never_exports_endpoint_values_or_host_names()
+    {
+        var html = DetailedReportBuilder.Build(Result(Dataset("Public synthetic", "alpha")), new DetailedReportOptions());
+        Assert.DoesNotContain("contoso.openai.azure.com", html);
+        Assert.Contains("configured (value not exported)", html);
+        Assert.DoesNotContain("machine_name", html);
+    }
+
+    [Fact]
     public void Report_is_self_contained_encoded_and_redacted()
     {
         var html = DetailedReportBuilder.Build(Result(Dataset("Public synthetic", "<img src=x onerror=alert(1)>")),
@@ -704,11 +999,18 @@ public class DetailedReportTests
         Assert.Contains("Content-Security-Policy", html);
         Assert.Contains("1.2.3", html);
         Assert.Contains("<code>abc</code>", html);
-        foreach (var section in new[] { "Executive summary", "Evaluation objective", "Model A configuration", "Model B configuration", "Provider and version information",
-            "Dataset and exact version", "Data-source provenance", "Evaluation configuration", "Summary metrics and deltas", "Quality assessment",
-            "Safety and harm assessment", "Empty-query, failure and unjudged analysis", "Threshold analysis", "Visual comparisons", "Query-level findings",
-            "Strengths and weaknesses", "Evidence-based recommendation", "Limitations and missing data", "Reproducibility", "Generation timestamp", "Application version" })
+        foreach (var section in new[] { "Executive summary", "Decision context", "Evaluation objective", "Model A profile", "Model B profile",
+            "Source provenance", "configuration fingerprint", "Dataset and exact version", "Data-source provenance", "Evaluation and inclusion settings",
+            "Compatibility assessment", "Summary metrics", "Retrieval-quality assessment", "Safety and harm assessment", "Empty-result and error analysis",
+            "Judgment coverage and unjudged analysis", "Latency and reliability", "Threshold analysis", "Query-level differences", "Strengths and weaknesses",
+            "Evidence-based recommendation", "Limitations", "Missing data", "Reproducibility metadata", "Generation timestamp", "Application version",
+            "Source commit", "Report schema version" })
             Assert.Contains(section, html);
+        for (int n = 1; n <= 28; n++) Assert.Contains($"id=\"s{n}\"", html);
+        Assert.DoesNotContain("id=\"s29\"", html);
+        Assert.Contains($"<code>{DetailedReportBuilder.SchemaVersion}</code>", html);
+        Assert.Contains("Sort by", html); // sortable tables
+        Assert.Contains("<details open><summary><h2", html); // collapsible sections
         Assert.Contains("Pick a helpdesk retriever", html);
     }
 
@@ -789,6 +1091,19 @@ public class DetailedReportTests
     }
 
     [Fact]
+    public void Sensitive_aggregate_report_masks_identifiers_in_the_recommendation()
+    {
+        var r = Result(Dataset("Sensitive", "alpha"), includeText: false);
+        typeof(PairComparisonResult).GetProperty(nameof(PairComparisonResult.Recommendation))!.SetValue(r, new PairRecommendation
+        {
+            Headline = "No recommendation.", Detail = "Blocked: query 'q-private-9' has no result.", Confidence = r.Recommendation.Confidence, ConfidenceReason = "document \"d-secret\" missing"
+        });
+        var html = WebUtility.HtmlDecode(DetailedReportBuilder.Build(r, new DetailedReportOptions()));
+        Assert.DoesNotContain("q-private-9", html);
+        Assert.DoesNotContain("d-secret", html);
+    }
+
+    [Fact]
     public void Report_suppresses_credential_named_parameters_and_connection_strings()
     {
         var r = Result(Dataset("Public synthetic", "alpha"));
@@ -820,7 +1135,7 @@ public class DetailedReportTests
             Assert.Equal("de-DE", System.Globalization.CultureInfo.CurrentCulture.Name);
             if (r.CurveA is { } ca && r.CurveMetricIds.Count > 0)
             {
-                var section = html[html.IndexOf("id=\"s13\"", StringComparison.Ordinal)..html.IndexOf("id=\"s14\"", StringComparison.Ordinal)];
+                var section = html[html.IndexOf("id=\"s18\"", StringComparison.Ordinal)..html.IndexOf("id=\"s19\"", StringComparison.Ordinal)];
                 var tables = System.Text.RegularExpressions.Regex.Matches(section, "<details>").Count;
                 Assert.Equal(tables * (Math.Max(ca.Thresholds.Length, r.CurveB!.Thresholds.Length) + 1), System.Text.RegularExpressions.Regex.Matches(section, "<tr>").Count);
             }

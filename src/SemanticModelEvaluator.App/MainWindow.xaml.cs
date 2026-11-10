@@ -13,10 +13,11 @@ public partial class MainWindow : Window
     private readonly SettingsStore settings;
     private readonly ProviderRegistry providers;
     private readonly ISecretStore secrets;
-    public MainWindow(WorkbenchViewModel model, PairComparisonViewModel pair, SettingsStore settings, ProviderRegistry providers, ISecretStore secrets)
+    public MainWindow(WorkbenchViewModel model, PairComparisonViewModel pair, SettingsStore settings, ProviderRegistry providers, ISecretStore secrets, DatasetHubViewModel datasets)
     {
         InitializeComponent();
         this.model = model; this.settings = settings; this.providers = providers; this.secrets = secrets; DataContext = model; PairTab.DataContext = pair;
+        DatasetHubTab.DataContext = datasets;
         ApplyTheme(settings.Current.Theme == "Dark");
         model.ThemeRequested += () =>
         {
@@ -25,16 +26,21 @@ public partial class MainWindow : Window
             ApplyTheme(dark);
         };
         model.MappingRequested += () => new MappingWindow { Owner = this }.ShowDialog();
-        Loaded += async (_, _) => await model.InitializeAsync();
+        Loaded += async (_, _) =>
+        {
+            await model.InitializeAsync();
+            await datasets.RefreshCommand.ExecuteAsync(null);
+        };
         Closing += (_, e) =>
         {
-            if (model.Busy || pair.Busy) { MessageBox.Show(this, "Cancel the current operation and wait for it to finish before closing."); e.Cancel = true; return; }
+            if (model.Busy || pair.Busy || datasets.Busy) { MessageBox.Show(this, "Cancel the current operation and wait for it to finish before closing."); e.Cancel = true; return; }
             if (model.Dirty && MessageBox.Show(this, "Close without saving the current workspace?", Core.AppPaths.AppName, MessageBoxButton.YesNo,
                 MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes) e.Cancel = true;
         };
-        Closed += (_, _) => model.Dispose();
+        Closed += (_, _) => { model.Dispose(); datasets.Dispose(); };
     }
     private void ProviderSettings(object sender, RoutedEventArgs e) => new ProviderSettingsWindow(providers, settings, secrets) { Owner = this }.ShowDialog();
+    private void BrowseDatasets(object sender, RoutedEventArgs e) => DatasetHubTab.IsSelected = true;
     private static void ApplyTheme(bool dark)
     {
         var colors = dark

@@ -1,0 +1,137 @@
+<UserControl x:Class="SemanticModelEvaluator.App.Controls.DatasetHubView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <DockPanel Margin="18">
+  <StackPanel DockPanel.Dock="Top">
+   <TextBlock Text="Dataset Hub" Style="{StaticResource Heading}"/>
+   <TextBlock Text="Choose a starter, download it, then use it in your evaluation. Advanced imports and authorized internal datasets are available below."/>
+   <DockPanel Margin="0,6">
+    <Button DockPanel.Dock="Right" Content="Cancel" Command="{Binding CancelCommand}" AutomationProperties.AutomationId="DatasetHubCancel"/>
+    <TextBlock Text="{Binding Status}" TextWrapping="Wrap" AutomationProperties.AutomationId="DatasetHubStatus"/>
+   </DockPanel>
+  </StackPanel>
+  <ScrollViewer VerticalScrollBarVisibility="Auto">
+   <StackPanel IsEnabled="{Binding Idle}">
+    <GroupBox Header="Quick start: public Hugging Face datasets">
+     <StackPanel>
+      <WrapPanel>
+       <ComboBox ItemsSource="{Binding Starters}" SelectedItem="{Binding Starter}" Width="320" AutomationProperties.AutomationId="DatasetStarter"/>
+       <TextBlock Text="Total download budget (MB)" VerticalAlignment="Center"/>
+       <TextBox Text="{Binding StorageMegabytes, UpdateSourceTrigger=PropertyChanged, ValidatesOnExceptions=True}" Width="70"/>
+       <Button Content="Download and prepare starter..." Command="{Binding ImportStarterCommand}" AutomationProperties.AutomationId="ImportDatasetStarter"/>
+      </WrapPanel>
+      <TextBlock Text="{Binding Starter.Description}" TextWrapping="Wrap"/>
+      <TextBlock Text="No Hugging Face token or Python required. Review source licenses before download. Public starters are NOT substitutes for internal RAI safety benchmarks." TextWrapping="Wrap"/>
+     </StackPanel>
+    </GroupBox>
+    <TabControl SelectedIndex="{Binding SourceIndex}" Height="40" AutomationProperties.AutomationId="DatasetSourceTabs">
+     <TabItem Header="All Datasets"/><TabItem Header="Hugging Face"/><TabItem Header="Microsoft Internal"/><TabItem Header="Local"/>
+    </TabControl>
+    <WrapPanel>
+     <TextBlock Text="Filter" VerticalAlignment="Center"/>
+     <TextBox Text="{Binding Filter, UpdateSourceTrigger=PropertyChanged}" Width="240" AutomationProperties.Name="Dataset filter"/>
+     <Button Content="Refresh local / recent" Command="{Binding RefreshCommand}"/>
+     <Button Content="Preview selected" Command="{Binding PreviewCommand}"/>
+     <Button Content="Add to evaluation" Command="{Binding UseCommand}" AutomationProperties.AutomationId="DatasetHubUse"/>
+     <Button Content="Use in two-model comparison" Command="{Binding UsePairCommand}"/>
+    </WrapPanel>
+    <DataGrid ItemsSource="{Binding VisibleCards}" SelectedItem="{Binding Selected}" AutoGenerateColumns="False"
+      IsReadOnly="True" Height="220" EnableRowVirtualization="True" AutomationProperties.AutomationId="DatasetCatalog">
+     <DataGrid.Columns>
+      <DataGridTextColumn Header="Dataset" Binding="{Binding Name}"/><DataGridTextColumn Header="Source" Binding="{Binding Source}"/>
+      <DataGridTextColumn Header="Version" Binding="{Binding Version}" Width="150"/><DataGridTextColumn Header="Task" Binding="{Binding Task}"/>
+      <DataGridTextColumn Header="Modality" Binding="{Binding Modality}"/><DataGridTextColumn Header="Examples" Binding="{Binding Examples}"/>
+      <DataGridTextColumn Header="Judgments" Binding="{Binding Judgments}"/><DataGridTextColumn Header="Access" Binding="{Binding Access}" Width="180"/>
+      <DataGridTextColumn Header="Approval / use" Binding="{Binding Approval}" Width="200"/><DataGridTextColumn Header="Cache" Binding="{Binding Cache}"/>
+     </DataGrid.Columns>
+    </DataGrid>
+    <Expander Header="Advanced: search other Hugging Face datasets and map static files" Margin="0,8">
+     <StackPanel>
+      <WrapPanel>
+       <TextBlock Text="Repository or search" VerticalAlignment="Center"/>
+       <TextBox Text="{Binding Repository, UpdateSourceTrigger=PropertyChanged}" Width="270" AutomationProperties.Name="Public dataset repository"/>
+       <Button Content="Search public Hub..." Command="{Binding SearchCommand}"/>
+       <TextBlock Text="Revision" VerticalAlignment="Center"/><TextBox Text="{Binding Revision, UpdateSourceTrigger=PropertyChanged}" Width="200" AutomationProperties.Name="Dataset revision"/>
+       <Button Content="Inspect / pin revision" Command="{Binding InspectCommand}"/>
+      </WrapPanel>
+      <WrapPanel>
+       <TextBlock Text="Configuration / split" VerticalAlignment="Center"/>
+       <ComboBox ItemsSource="{Binding Configurations}" SelectedItem="{Binding Configuration}" Width="330" AutomationProperties.Name="Dataset configuration and split"/>
+       <TextBlock Text="Static file" VerticalAlignment="Center"/>
+       <ComboBox ItemsSource="{Binding Files}" SelectedItem="{Binding SelectedFile}" Width="440" AutomationProperties.Name="Dataset file"/>
+      </WrapPanel>
+      <WrapPanel>
+       <CheckBox Content="I reviewed and accept the dataset and asset license terms" IsChecked="{Binding LicenseAccepted}"/>
+       <TextBlock Text="Maximum MB per file" VerticalAlignment="Center"/><TextBox Text="{Binding StorageMegabytes, ValidatesOnExceptions=True}" Width="70"/>
+       <Button Content="Download / Retry selected file" Command="{Binding DownloadCommand}"/>
+       <Button Content="Remove selected cached download..." Command="{Binding RemoveDownloadCommand}"/>
+      </WrapPanel>
+      <TextBlock Text="A small row subset may still require downloading a whole selected shard. The byte estimate above is for that shard. Unknown licenses, sizes and hashes block acquisition; no bulk download or repository code execution."/>
+     </StackPanel>
+    </Expander>
+    <Expander Header="Microsoft Internal: Genoa / Florence dataset inventory and authorized downloads" IsExpanded="True" Margin="0,8">
+     <StackPanel>
+      <TextBlock Text="Eight source families from ADO 64797876. These are inventory labels, not guessed blob paths or approval grants." TextWrapping="Wrap"/>
+      <DataGrid ItemsSource="{Binding InternalInventory}" AutoGenerateColumns="False" IsReadOnly="True" Height="220" AutomationProperties.AutomationId="GenoaDatasetInventory">
+       <DataGrid.Columns>
+        <DataGridTextColumn Header="Family" Binding="{Binding Name}" Width="230"/>
+        <DataGridTextColumn Header="Purpose" Binding="{Binding Purpose}" Width="240"/>
+        <DataGridTextColumn Header="Readiness (source-reported)" Binding="{Binding Readiness}" Width="330"/>
+        <DataGridTextColumn Header="Next step" Binding="{Binding NextStep}" Width="480"/>
+       </DataGrid.Columns>
+      </DataGrid>
+      <Expander Header="Storage, access, source links and setup">
+       <TextBox Text="{Binding InternalSetup, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="240" VerticalScrollBarVisibility="Auto"/>
+      </Expander>
+      <WrapPanel>
+       <ComboBox ItemsSource="{Binding Containers}" SelectedItem="{Binding Container}" Width="340" AutomationProperties.Name="Internal dataset container"/>
+       <Button Content="List authorized dataset versions..." Command="{Binding ListInternalCommand}"/>
+       <Button Content="Fetch selected version for new evaluation..." Command="{Binding FetchNewCommand}" AutomationProperties.AutomationId="FetchNewDataset"/>
+      </WrapPanel>
+      <WrapPanel>
+       <TextBlock Text="Run payload hash" VerticalAlignment="Center"/><TextBox Text="{Binding PayloadHash}" Width="340" AutomationProperties.Name="Exact run payload hash"/>
+       <Button Content="Get Matching Dataset..." Command="{Binding FetchMatchingCommand}"/>
+      </WrapPanel>
+      <TextBlock Text="Catalog access is not privacy/CELA approval. Governed RAI or sensitive payloads without approval evidence are blocked. Existing cloud batch/run selection is preserved in Compare two models. ADO inventory is never a downloader."/>
+     </StackPanel>
+    </Expander>
+    <Expander Header="Advanced: normalize static tables / embedded images" Margin="0,8">
+     <StackPanel>
+      <WrapPanel>
+       <Button Content="Open local CSV / JSON / Parquet..." Command="{Binding LocalTableCommand}"/>
+       <TextBlock Text="Table role" VerticalAlignment="Center"/><ComboBox ItemsSource="{Binding TableKinds}" SelectedItem="{Binding Kind}" Width="150"/>
+       <CheckBox Content="Caption pairs (Text + embedded ImagePath)" IsChecked="{Binding CaptionPairs}"/>
+       <CheckBox Content="Image queries / text candidates" IsChecked="{Binding ImageQueries}"/>
+      </WrapPanel>
+      <DataGrid ItemsSource="{Binding Columns}" AutoGenerateColumns="False" CanUserAddRows="False" IsReadOnly="False" Height="180" AutomationProperties.Name="Dataset column mapping">
+       <DataGrid.Columns>
+        <DataGridTextColumn Header="Source column" Binding="{Binding Column}" IsReadOnly="True" Width="*"/>
+        <DataGridTemplateColumn Header="Explicit role" Width="*">
+         <DataGridTemplateColumn.CellTemplate><DataTemplate>
+          <ComboBox ItemsSource="{Binding DataContext.ColumnRoles, RelativeSource={RelativeSource AncestorType=UserControl}}" SelectedItem="{Binding Role, UpdateSourceTrigger=PropertyChanged}"/>
+         </DataTemplate></DataGridTemplateColumn.CellTemplate>
+        </DataGridTemplateColumn>
+       </DataGrid.Columns>
+      </DataGrid>
+      <WrapPanel>
+       <CheckBox Content="I confirm the mapping and chosen split" IsChecked="{Binding MappingConfirmed}"/>
+       <Button Content="Add mapped input" Command="{Binding AddInputCommand}"/><Button Content="Clear input list" Command="{Binding ClearInputsCommand}"/>
+      </WrapPanel>
+      <ListBox ItemsSource="{Binding Inputs}" MaxHeight="110">
+       <ListBox.ItemTemplate><DataTemplate><TextBlock><Run Text="{Binding Mapping.Kind}"/><Run Text=" | "/><Run Text="{Binding Hub.Repository}"/><Run Text=" | "/><Run Text="{Binding RemoteFile}"/><Run Text=" | split "/><Run Text="{Binding Split}"/></TextBlock></DataTemplate></ListBox.ItemTemplate>
+      </ListBox>
+      <WrapPanel>
+       <TextBlock Text="Name" VerticalAlignment="Center"/><TextBox Text="{Binding DatasetName}" Width="260"/>
+       <TextBlock Text="Task" VerticalAlignment="Center"/><ComboBox ItemsSource="{Binding Tasks}" SelectedItem="{Binding Task}" Width="170"/>
+       <TextBlock Text="Rows per input (subset)" VerticalAlignment="Center"/><TextBox Text="{Binding RowsPerFile, ValidatesOnExceptions=True}" Width="85"/>
+       <Button Content="Build cached dataset" Command="{Binding BuildCommand}" AutomationProperties.AutomationId="DatasetHubBuild"/>
+      </WrapPanel>
+      <TextBlock Text="Text retrieval: add Queries, Documents and Judgments tables. Caption pairs create only documented positive pairs; other pairs remain unjudged. Image-query tasks require a compatible runner or imported predictions. Nested lists need explicit static flattening."/>
+     </StackPanel>
+    </Expander>
+    <TextBlock Text="{Binding Details}" TextWrapping="Wrap" Margin="0,8" MaxHeight="160"/>
+    <DataGrid ItemsSource="{Binding Preview}" IsReadOnly="True" Height="180" AutomationProperties.Name="Authorized dataset preview"/>
+   </StackPanel>
+  </ScrollViewer>
+ </DockPanel>
+</UserControl>

@@ -8,6 +8,7 @@ using SemanticModelEvaluator.Core.Persistence;
 using SemanticModelEvaluator.Core.Providers;
 using SemanticModelEvaluator.Core.Security;
 using SemanticModelEvaluator.Providers;
+using SemanticModelEvaluator.Providers.EvalKit;
 using Xunit;
 
 namespace SemanticModelEvaluator.Tests;
@@ -18,6 +19,43 @@ public sealed class NetworkFactAttribute : FactAttribute
     {
         if (Environment.GetEnvironmentVariable("SMEVAL_VERIFY_NETWORK") != "1")
             Skip = "Opt-in network verification: set SMEVAL_VERIFY_NETWORK=1. Downloads two public models; no datasets are transmitted.";
+    }
+}
+
+public sealed class PsapiFactAttribute : FactAttribute
+{
+    public PsapiFactAttribute()
+    {
+        if (Environment.GetEnvironmentVariable("SMEVAL_VERIFY_PSAPI") != "1")
+            Skip = "Opt-in PSAPI verification: set SMEVAL_VERIFY_PSAPI=1 on a machine with a built EvalKit CLI and EvalKit.Backend.Psapi (local CPU, no network).";
+    }
+}
+
+public class PsapiLiveVerificationTests
+{
+    [PsapiFact]
+    public async Task Space_v6_runs_through_the_evalkit_backend_and_reports_its_identity()
+    {
+        using var root = new TempAppRoot();
+        var cli = new EvalKitCli(new SettingsStore(Path.Combine(root.Root, "settings.json")));
+        var status = PsapiBackendStatus.Probe(cli);
+        Assert.True(status.CanRun, status.Summary);
+        var spec = PsapiProvider.Find("spacev6")!;
+        var manifest = EvalKitFixtures.WriteDataset(Path.Combine(root.Root, "ds"));
+        var judgements = Path.Combine(root.Root, "ds", "judgements.jsonl");
+        File.WriteAllText(judgements, File.ReadAllText(judgements).Replace("\"document_id\"", "\"doc_id\""));
+        var ds = Core.EvalKit.EvalKitFormat.LoadDataset(manifest, "Synthetic test data");
+        Assert.Empty(PsapiJob.CheckDataset(spec, ds));
+        var name = PsapiJob.RunName(spec, ds.Name, DateTimeOffset.Now);
+        var job = Path.Combine(root.Root, name + ".job.json");
+        File.WriteAllText(job, PsapiJob.Build(spec, manifest, status.PackageDirectory!, 3, name, PsapiJob.TextSource(spec, ds)).ToJsonString());
+        var output = Path.Combine(root.Root, "out");
+        await cli.RunJobAsync(job, output, null, CancellationToken.None);
+        var run = Core.EvalKit.EvalKitFormat.ReadRun(Assert.Single(Core.EvalKit.EvalKitFormat.FindMetricsFiles(output)));
+        Assert.Equal("spacev6", run.BackendModelId);
+        Assert.Equal(100, run.BackendDimension);
+        var results = Core.EvalKit.EvalKitFormat.ReadResults(run);
+        Assert.All(results.Queries.SelectMany(q => q.Results), r => Assert.InRange(r.Score, 0, 1));
     }
 }
 

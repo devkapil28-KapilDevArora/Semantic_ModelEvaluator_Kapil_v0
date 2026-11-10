@@ -105,7 +105,8 @@ public static class WorkspaceService
             {
                 try
                 {
-                    var loaded = DatasetLoader.LoadManifest(d.SourcePath);
+                    DatasetPolicy.Ensure(d.Provenance, DatasetOperation.Preview);
+                    var loaded = DatasetLoader.Load(d.SourcePath);
                     if (loaded.ContentHash != d.ContentHash)
                         warnings.Add(new(ValidationSeverity.Warning, $"Dataset '{d.Name}' has changed since the workspace was saved (content hash differs). Results may not correspond to the current data."));
                     else dataset = loaded;

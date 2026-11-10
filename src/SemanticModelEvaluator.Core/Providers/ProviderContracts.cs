@@ -35,6 +35,13 @@ public interface ITextEmbeddingRunner : IModelRunner
     Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, EmbeddingRole role, CancellationToken cancellationToken);
 }
 
+/// <summary>Isolated backends that evaluate a dataset as one job rather than returning per-item embeddings.</summary>
+public interface IDatasetModelRunner : IModelRunner
+{
+    Task EvaluateAsync(Datasets.EvalDataset dataset, Evaluation.EvaluationConfig config, Evaluation.ModelRunResult result,
+        IProgress<ProgressInfo>? progress, CancellationToken cancellationToken);
+}
+
 /// <summary>Thrown for authentication/authorization failures. Never retried as a transient error and never answered by switching identity.</summary>
 public sealed class AccessDeniedException(string message, Exception? inner = null) : Exception(message, inner);
 

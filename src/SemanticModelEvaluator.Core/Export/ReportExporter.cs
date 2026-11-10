@@ -52,6 +52,7 @@ public static class ReportExporter
 
     public static string ToCsv(ExportContext c)
     {
+        DatasetPolicy.Ensure(c.Workspace.Dataset?.Provenance, DatasetOperation.ExportSummary);
         var sb = new StringBuilder();
         sb.AppendLine("scenario,model_key,run_id,dataset,dataset_version,dataset_hash,threshold,k,metric_id,metric,value,delta_vs_reference,assessment,direction,samples,judged,missing,is_reference,synthetic");
         var byId = c.Evaluations.ToDictionary(e => e.Scenario.Id);
@@ -72,6 +73,7 @@ public static class ReportExporter
 
     public static string ToJson(ExportContext c, ExportOptions o)
     {
+        DatasetPolicy.Ensure(c.Workspace.Dataset?.Provenance, o.IncludeExampleText ? DatasetOperation.ExportSamples : DatasetOperation.ExportSummary);
         var refScenario = c.Evaluations.First(e => e.Scenario.Id == c.Comparison.ReferenceScenarioId).Scenario;
         var summary = new
         {
@@ -157,6 +159,7 @@ public static class ReportExporter
 
     public static string ToText(ExportContext c)
     {
+        DatasetPolicy.Ensure(c.Workspace.Dataset?.Provenance, DatasetOperation.ExportSummary);
         var sb = new StringBuilder();
         var reference = c.Evaluations.First(e => e.Scenario.Id == c.Comparison.ReferenceScenarioId);
         sb.AppendLine($"{AppPaths.AppName} — comparison summary");
@@ -192,6 +195,7 @@ public static class ReportExporter
 
     public static string ToHtml(ExportContext c, ExportOptions o)
     {
+        DatasetPolicy.Ensure(c.Workspace.Dataset?.Provenance, o.IncludeExampleText ? DatasetOperation.ExportSamples : DatasetOperation.ExportSummary);
         string E(string? s) => WebUtility.HtmlEncode(s ?? "");
         var sb = new StringBuilder();
         var byId = c.Evaluations.ToDictionary(e => e.Scenario.Id);

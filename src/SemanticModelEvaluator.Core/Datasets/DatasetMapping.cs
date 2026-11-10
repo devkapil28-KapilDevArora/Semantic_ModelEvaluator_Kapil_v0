@@ -139,6 +139,8 @@ public sealed class DatasetManifest
     public string DataClassification { get; set; } = "Unclassified";
     public string? PositiveLabel { get; set; }
     public bool Synthetic { get; set; }
+    public DatasetProvenance? Provenance { get; set; }
+    public Dictionary<string, string> Assets { get; set; } = [];
     public List<TableMapping> Tables { get; set; } = [];
 
     public static readonly JsonSerializerOptions JsonOptions = new()
@@ -164,10 +166,24 @@ public sealed class DatasetManifest
 
 public static class DatasetLoader
 {
+    public static EvalDataset Load(string path) => path.EndsWith(".smds.json", StringComparison.OrdinalIgnoreCase)
+        ? LoadManifest(path) : EvalKit.EvalKitFormat.LoadDataset(path);
+
     public static EvalDataset LoadManifest(string manifestPath)
     {
         var manifest = DatasetManifest.Load(manifestPath);
+        DatasetPolicy.Ensure(manifest.Provenance, DatasetOperation.Preview);
         var baseDir = Path.GetDirectoryName(Path.GetFullPath(manifestPath))!;
+        foreach (var (asset, expected) in manifest.Assets)
+        {
+            var path = Path.GetFullPath(Path.Combine(baseDir, asset));
+            if (!path.StartsWith(baseDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Dataset asset path escapes its manifest directory.");
+            using var stream = File.OpenRead(path);
+            var actual = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+            if (!actual.Equals(expected, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Dataset image integrity check failed. Restore the original asset before evaluation.");
+        }
         var tables = new List<(TableMapping, TabularData)>();
         foreach (var t in manifest.Tables)
         {
@@ -295,6 +311,7 @@ public static class DatasetBuilder
             DataClassification = manifest.DataClassification,
             PositiveLabel = manifest.PositiveLabel,
             IsSynthetic = manifest.Synthetic,
+            Provenance = manifest.Provenance,
             SourcePath = sourcePath,
             ContentHash = contentHash,
             Queries = queries,
