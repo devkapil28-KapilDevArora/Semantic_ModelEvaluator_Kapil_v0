@@ -246,16 +246,17 @@ public static class EvalKitFormat
         if (invalid > 0) { result.Warnings.Add($"{invalid} of {line} result rows were invalid and skipped."); result.Status = RunStatus.CompletedWithErrors; }
         if (expectedQueryIds is not null)
         {
+            var expected = expectedQueryIds.ToHashSet(StringComparer.Ordinal);
+            if (byQuery.Keys.Any(id => !expected.Contains(id)))
+                throw new InvalidDataException("Captured results contain query IDs outside the selected dataset. Load the exact dataset for this run or perform a new evaluation.");
             var absent = expectedQueryIds.Where(id => !byQuery.ContainsKey(id)).Distinct(StringComparer.Ordinal).ToList();
-            if (absent.Count > 0 && run.FailedQueryCount == 0)
+            if (absent.Count > 0 && run.FailedQueryCount == 0 && absent.Count == run.ZeroResultCount && expected.Count == run.QueryCount && invalid == 0)
             {
                 foreach (var id in absent) result.Queries.Add(new QueryResult { QueryId = id, Results = [] });
-                if (absent.Count != run.ZeroResultCount)
-                    result.Warnings.Add($"{absent.Count} dataset queries have no result rows, but EvalKit recorded {run.ZeroResultCount} zero-result queries; they were treated as empty. Check that the run and dataset match.");
             }
             else if (absent.Count > 0)
-                result.Warnings.Add($"{absent.Count} dataset queries have no result rows and EvalKit recorded {run.FailedQueryCount} failed and {run.ZeroResultCount} zero-result queries " +
-                    "without ids, so empty and failed queries cannot be told apart; they are left as missing (unknown).");
+                result.Warnings.Add($"{absent.Count} dataset queries have no result rows. EvalKit recorded {run.ZeroResultCount} zero-result queries, {run.FailedQueryCount} failed queries and {run.QueryCount} queries in total " +
+                    $"for {expected.Count} expected IDs ({invalid} invalid result rows). Empty, missing and failed queries cannot be told apart with these counts; absent IDs remain missing (unknown).");
         }
         if (rankOnly > 0) { result.ScoresIncludeRanks = true; result.Warnings.Add($"{rankOnly} result rows had no score; −position is used, so the threshold acts as a rank cut-off for them."); }
         if (run.QueryDurationSeconds is { } secs && run.QueryCount > 0) result.Performance.MeanLatencyMs = secs * 1000 / run.QueryCount;

@@ -554,6 +554,44 @@ public class EvalKitAndPairComparisonTests
         Assert.Contains(r.Blocking, x => x.StartsWith("Model B") && x.Contains(expected, StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(r.Blocking, x => x.StartsWith("Model A"));
         Assert.Contains("not", r.Recommendation.Headline, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(r.Metrics);
+        Assert.Empty(r.Performance);
+        Assert.Empty(r.Rows);
+        Assert.Null(r.CurveA);
+        Assert.Null(r.Agreement);
+        Assert.Equal(CompatibilityStatus.Blocked, r.Compatibility.Single(c => c.Aspect == "Same judgments and inclusion rules").Status);
+        var html = DetailedReportBuilder.Build(r, new DetailedReportOptions());
+        Assert.Contains("Not evaluated: the selected runs are not comparable", html);
+        Assert.DoesNotContain("<caption>Empty results and failures</caption>", html);
+        Assert.DoesNotContain("<caption>Latency, errors and usage</caption>", html);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void No_common_in_scope_query_ids_blocks_even_when_dataset_identity_matches(bool unrelated)
+    {
+        var (ds, a, b) = LocalPair(Fixtures.NewTempDir());
+        a.Result.Queries = [new QueryResult { QueryId = unrelated ? "other" : "q1" }];
+        b.Result.Queries = [new QueryResult { QueryId = unrelated ? "other" : "q2" }];
+        var r = Comparer.Compare(ds, a, b, new PairSettings { K = 3 }, false);
+        Assert.False(r.IsComparable);
+        Assert.Contains(r.Blocking, x => x.Contains("no common query/example IDs"));
+        Assert.Equal(CompatibilityStatus.Blocked, r.Compatibility.Single(c => c.Aspect == "Same query set").Status);
+        Assert.Empty(r.Metrics);
+        Assert.Empty(r.Rows);
+    }
+
+    [Fact]
+    public void Query_overlap_outside_the_selected_sample_does_not_make_runs_comparable()
+    {
+        var (ds, a, b) = LocalPair(Fixtures.NewTempDir());
+        a.Result.Queries = [new QueryResult { QueryId = "q2" }];
+        b.Result.Queries = [new QueryResult { QueryId = "q2" }];
+        var r = Comparer.Compare(ds, a, b, new PairSettings { K = 3, SampledIds = ["q1"] }, false);
+        Assert.False(r.IsComparable);
+        Assert.Empty(r.Metrics);
+        Assert.Equal(CompatibilityStatus.Blocked, r.Compatibility.Single(c => c.Aspect == "Same query set").Status);
     }
 
     [Fact]
@@ -775,8 +813,12 @@ public class EvalKitAndPairComparisonTests
         var q3 = r.Queries.Single(q => q.QueryId == "q3");
         Assert.Empty(q3.Results); Assert.Null(q3.Error);
         Assert.DoesNotContain(r.Warnings, w => w.Contains("dataset queries have no result rows"));
-        // A count that disagrees with the envelope is still treated as empty but flagged.
-        Assert.Contains(EvalKitFormat.ReadResults(ek, expectedQueryIds: ["q1", "q2", "q3", "q4"]).Warnings, w => w.Contains("recorded 1 zero-result"));
+        // Inconsistent counts cannot establish which absent IDs were genuinely empty.
+        var inconsistent = EvalKitFormat.ReadResults(ek, expectedQueryIds: ["q1", "q2", "q3", "q4"]);
+        Assert.Equal(2, inconsistent.Queries.Count);
+        Assert.Contains(inconsistent.Warnings, w => w.Contains("recorded 1 zero-result"));
+        Assert.Contains("outside the selected dataset",
+            Assert.Throws<InvalidDataException>(() => EvalKitFormat.ReadResults(ek, expectedQueryIds: ["other1", "other2", "other3"])).Message);
     }
 
     [Fact]
@@ -909,6 +951,24 @@ public class DetailedReportTests
             new PairSide { Configuration = cfgA, Result = a, RunDataset = ds.ToReference() },
             new PairSide { Configuration = ModelConfiguration.From(b, "Hugging Face"), Result = b, RunDataset = ds.ToReference() },
             new PairSettings { K = 3, Objective = "Pick a helpdesk retriever" }, includeText);
+    }
+
+    [Fact]
+    public void Report_header_does_not_label_unknown_captured_sources_as_public()
+    {
+        var ds = Dataset("Public", "alpha");
+        var pair = Result(ds);
+        var side = new PairSide
+        {
+            Configuration = pair.A.Configuration, Result = pair.A.Result, RunDataset = pair.A.RunDataset,
+            Classification = "Unknown classification (cached by another tool)"
+        };
+        var r = Comparer.Compare(ds, side, pair.B, new PairSettings { K = 3 }, false);
+        var html = DetailedReportBuilder.Build(r, new DetailedReportOptions());
+        var header = html[..html.IndexOf("</header>", StringComparison.Ordinal)];
+        Assert.Contains("Sensitive or unclassified data", header);
+        Assert.Contains("Unknown classification", header);
+        Assert.Contains("Dataset: Public", header);
     }
 
     [Fact]

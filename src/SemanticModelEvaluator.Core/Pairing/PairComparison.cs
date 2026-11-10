@@ -289,7 +289,7 @@ public sealed class PairComparer(MetricRegistry registry)
         "Both runs must be scored against the exact loaded dataset: same name/id, same version (a leading 'v' is ignored) and same payload/content hash.",
         "Both runs must be for the dataset's task.",
         "Model A and Model B must be different configurations (model, version, endpoint or parameters).",
-        "Each side must have produced results for at least one item.",
+        "Both runs must contain at least one common query/example in the selected dataset and scope.",
         "Warnings (not blocking): K beyond a run's cached depth, different execution kinds (measured vs recorded latency), synthetic baselines, partial failures, low judgment coverage."
     ];
 
@@ -330,6 +330,23 @@ public sealed class PairComparer(MetricRegistry registry)
         };
     }
 
+    public static IReadOnlyList<string> DatasetMismatches(DatasetReference recorded, DatasetReference selected)
+    {
+        var issues = EvalKitDatasetIdentity.From(recorded).Mismatches(EvalKitDatasetIdentity.From(selected)).ToList();
+        if (recorded.Task != selected.Task) issues.Add($"run task {recorded.Task} differs from dataset task {selected.Task}.");
+        return issues;
+    }
+
+    private static HashSet<string> ItemIds(EvalDataset dataset) =>
+        (IsRetrievalTask(dataset.Task) ? dataset.Queries.Select(q => q.Id) : dataset.Examples.Select(e => e.Id)).ToHashSet(StringComparer.Ordinal);
+
+    private static HashSet<string> CoveredIds(EvalDataset dataset, ModelRunResult run)
+    {
+        var ids = ItemIds(dataset);
+        ids.IntersectWith(IsRetrievalTask(dataset.Task) ? run.Queries.Select(q => q.QueryId) : run.Examples.Select(p => p.ExampleId));
+        return ids;
+    }
+
     public static (List<string> Blocking, List<string> Warnings) CheckEligibility(EvalDataset dataset, PairSide a, PairSide b, int k)
     {
         DatasetPolicy.Ensure(dataset, DatasetOperation.Evaluate);
@@ -339,15 +356,13 @@ public sealed class PairComparer(MetricRegistry registry)
             blocking.Add($"Two-model comparison supports retrieval, reranking, classification and safety tasks. {dataset.Task} datasets are not supported here; use the multi-model workbench (Explorer/Comparator), which has task-specific metrics for them.");
         if (IsRetrievalTask(dataset.Task) && dataset.Queries.Count > 0 && dataset.JudgmentCoverage < 0.5)
             warnings.Add($"Low judgment coverage: only {dataset.JudgmentCoverage:P0} of queries have judgments; quality metrics rest on a minority of queries.");
-        var loaded = EvalKitDatasetIdentity.From(dataset.ToReference());
         foreach (var (name, side) in new[] { ("Model A", a), ("Model B", b) })
         {
             if (side.Configuration.ModelId.StartsWith(EvalKitRun.UnknownModelPrefix, StringComparison.Ordinal))
                 warnings.Add($"{name}: the run does not record the model name or version; its identity is unknown, so the result cannot be attributed to a specific model.");
             if (side.Result.ScoresIncludeRanks && side.Threshold is not null)
                 warnings.Add($"{name}: some results have positions only; its threshold acts as a rank cut-off for them.");
-            foreach (var m in EvalKitDatasetIdentity.From(side.RunDataset).Mismatches(loaded)) blocking.Add($"{name}: {m}");
-            if (side.RunDataset.Task != dataset.Task) blocking.Add($"{name}: run task {side.RunDataset.Task} differs from dataset task {dataset.Task}.");
+            foreach (var m in DatasetMismatches(side.RunDataset, dataset.ToReference())) blocking.Add($"{name}: {m}");
             if (!side.Result.HasResults)
                 blocking.Add($"{name}: the run produced no results{(side.Result.Error is { } e ? " (" + e + ")" : "")}.");
             if (side.CachedDepth is { } depth && k > depth) warnings.Add($"{name}: K={k} exceeds the {depth} results cached per query; ranks beyond {depth} are treated as not retrieved.");
@@ -355,6 +370,8 @@ public sealed class PairComparer(MetricRegistry registry)
             if (side.Result.Status is RunStatus.CompletedWithErrors or RunStatus.Failed or RunStatus.Cancelled)
                 warnings.Add($"{name}: run status {side.Result.Status}; partial results are compared and failed items are counted separately.");
         }
+        if (!CoveredIds(dataset, a.Result).Overlaps(CoveredIds(dataset, b.Result)))
+            blocking.Add("The runs have no common query/example IDs in the selected dataset and scope. Select matching captured runs and their exact dataset, or start a new evaluation on this dataset.");
         var keyA = a.Configuration.Fingerprint; var keyB = b.Configuration.Fingerprint;
         if (keyA == keyB) blocking.Add("Model A and Model B are the same configuration.");
         if (a.Result.Performance.Measured != b.Result.Performance.Measured)
@@ -367,7 +384,6 @@ public sealed class PairComparer(MetricRegistry registry)
     public PairComparisonResult Compare(EvalDataset dataset, PairSide a, PairSide b, PairSettings settings, bool includeText, CancellationToken ct = default)
     {
         if (settings.K < 1) throw new ArgumentOutOfRangeException(nameof(settings), "K must be positive.");
-        var (blocking, warnings) = CheckEligibility(dataset, a, b, settings.K);
         if (settings.SampledIds is { } sampled)
         {
             var scope = sampled.ToHashSet(StringComparer.Ordinal);
@@ -378,6 +394,23 @@ public sealed class PairComparer(MetricRegistry registry)
         var fullItemCount = IsRetrievalTask(dataset.Task) ? dataset.Queries.Count : dataset.Examples.Count;
         if (settings.JudgedItemsOnly) dataset = Restrict(dataset, JudgedIds(dataset));
         var retrieval = IsRetrievalTask(dataset.Task);
+        var (blocking, warnings) = CheckEligibility(dataset, a, b, settings.K);
+        if (blocking.Count > 0)
+        {
+            return new PairComparisonResult
+            {
+                A = a, B = b, Dataset = dataset.ToReference(), DatasetClassification = dataset.DataClassification, Settings = settings,
+                Blocking = blocking, Warnings = warnings, CountsA = new(), CountsB = new(), IsRetrieval = retrieval,
+                Recommendation = new PairRecommendation
+                {
+                    Headline = "No recommendation — the runs are not comparable.", Detail = string.Join(" ", blocking),
+                    Confidence = ConfidenceLevel.None, ConfidenceReason = "Eligibility rules failed; no metrics were calculated."
+                },
+                Compatibility = AssessCompatibility(dataset, a, b, settings, blocking, RawScoresComparable(a.Configuration, b.Configuration)),
+                RawScoresComparable = RawScoresComparable(a.Configuration, b.Configuration),
+                Limitations = ["Comparison was blocked before scoring. No model failure rate, quality, latency delta or item-level outcome can be inferred from this selection."]
+            };
+        }
         var thresholds = new ThresholdEngine(registry);
         var metricDefs = registry.Compatible(dataset.Task, dataset)
             .Where(d => d.Category != MetricCategory.Performance && (settings.Dimensions is null || settings.Dimensions.Contains(d.Category))).ToList();
@@ -407,7 +440,7 @@ public sealed class PairComparer(MetricRegistry registry)
         var perf = Performance(a, b, countsA, countsB, rows);
         var rawComparable = RawScoresComparable(a.Configuration, b.Configuration);
         var agreement = retrieval ? Agree(dataset, rows, settings.K) : null;
-        var compatibility = AssessCompatibility(dataset, a, b, settings, rows, blocking, rawComparable);
+        var compatibility = AssessCompatibility(dataset, a, b, settings, blocking, rawComparable);
 
         var primary = (retrieval ? PrimaryRetrieval : PrimaryClassification).FirstOrDefault(id => metrics.Any(m => m.Definition.Id == id && m.A?.Value is not null && m.B?.Value is not null));
         var limitations = Limitations(dataset, a, b, countsA, countsB, rows, settings, retrieval);
@@ -497,7 +530,7 @@ public sealed class PairComparer(MetricRegistry registry)
         };
     }
 
-    private static List<CompatibilityCheck> AssessCompatibility(EvalDataset ds, PairSide a, PairSide b, PairSettings s, List<PairQueryRow> rows,
+    private static List<CompatibilityCheck> AssessCompatibility(EvalDataset ds, PairSide a, PairSide b, PairSettings s,
         List<string> blocking, bool rawComparable)
     {
         var checks = new List<CompatibilityCheck>();
@@ -509,12 +542,15 @@ public sealed class PairComparer(MetricRegistry registry)
         checks.Add(new("Same task", taskOk ? CompatibilityStatus.Pass : CompatibilityStatus.Blocked, $"Dataset task {ds.Task}; A {a.RunDataset.Task}; B {b.RunDataset.Task}."));
         checks.Add(new("Distinct configurations", a.Configuration.Fingerprint == b.Configuration.Fingerprint ? CompatibilityStatus.Blocked : CompatibilityStatus.Pass,
             a.Configuration.Fingerprint == b.Configuration.Fingerprint ? "Identical configuration fingerprints." : "Fingerprints differ (model, version, endpoint or parameters)."));
-        int onlyA = rows.Count(r => !r.A.Missing && r.B.Missing), onlyB = rows.Count(r => r.A.Missing && !r.B.Missing), neither = rows.Count(r => r.A.Missing && r.B.Missing);
-        checks.Add(new("Same query set", onlyA + onlyB == 0 ? CompatibilityStatus.Pass : CompatibilityStatus.Warning,
-            onlyA + onlyB == 0 ? $"Both runs cover the same {rows.Count - neither} of {rows.Count} item(s) in scope."
-                : $"{onlyA} item(s) only in A's run, {onlyB} only in B's run; missing items are reported, never scored as zero."));
-        checks.Add(new("Same judgments and inclusion rules", CompatibilityStatus.Pass,
-            "Both sides are scored by this application against the loaded dataset's judgments with the same K, sample and inclusion rule " +
+        var coveredA = CoveredIds(ds, a.Result); var coveredB = CoveredIds(ds, b.Result);
+        int shared = coveredA.Intersect(coveredB).Count(), onlyA = coveredA.Except(coveredB).Count(), onlyB = coveredB.Except(coveredA).Count();
+        var complete = coveredA.SetEquals(ItemIds(ds)) && coveredB.SetEquals(coveredA);
+        checks.Add(new("Same query set", shared == 0 ? CompatibilityStatus.Blocked : complete ? CompatibilityStatus.Pass : CompatibilityStatus.Warning,
+            shared == 0 ? "No common query/example IDs in the selected dataset and scope. No item-level comparison is possible."
+                : $"Both runs cover {shared} of {ItemIds(ds).Count} item(s) in scope; {onlyA} only in A, {onlyB} only in B. Missing items are reported, never scored as zero."));
+        checks.Add(new("Same judgments and inclusion rules", blocking.Count > 0 ? CompatibilityStatus.Blocked : CompatibilityStatus.Pass,
+            blocking.Count > 0 ? "Not evaluated: resolve the eligibility failures before applying this dataset's judgments."
+            : "Both sides are scored by this application against the loaded dataset's judgments with the same K, sample and inclusion rule " +
             $"({(s.JudgedItemsOnly ? "judged items only" : "all items; unjudged reported as unknown")})."));
         checks.Add(a.CachedDepth is { } da && b.CachedDepth is { } db
             ? new("Same candidate limit", da == db ? CompatibilityStatus.Pass : CompatibilityStatus.Warning,
@@ -534,8 +570,10 @@ public sealed class PairComparer(MetricRegistry registry)
             $"A {dimA ?? "unknown"}, B {dimB ?? "unknown"}. Each model ranks the corpus with its own embeddings, so equal dimensions are not required; vectors are never mixed across models."));
         var truncA = P(a.Configuration, "max_input_tokens"); var truncB = P(b.Configuration, "max_input_tokens");
         checks.Add(new("Truncation / input limit", truncA is null || truncB is null ? CompatibilityStatus.Unknown : truncA == truncB ? CompatibilityStatus.Pass : CompatibilityStatus.Note,
-            $"Maximum input tokens A {truncA ?? "unknown"}, B {truncB ?? "unknown"}. Longer inputs are truncated by each model's own tokenizer; differences are intentional model properties."));
-        checks.Add(new("Latency basis", a.Result.Performance.Measured == b.Result.Performance.Measured ? CompatibilityStatus.Pass : CompatibilityStatus.Warning,
+            $"Maximum input tokens A {truncA ?? "unknown"}, B {truncB ?? "unknown"}. Over-limit handling depends on the backend (truncation or rejection); truncation is not assumed."));
+        checks.Add(new("Latency basis", blocking.Count > 0 ? CompatibilityStatus.Blocked
+            : a.Result.Performance.Measured && b.Result.Performance.Measured ? CompatibilityStatus.Pass
+            : a.Result.Performance.Measured != b.Result.Performance.Measured ? CompatibilityStatus.Warning : CompatibilityStatus.Unknown,
             $"A {(a.Result.Performance.Measured ? "measured by this application" : "recorded by another tool or unavailable")}; B {(b.Result.Performance.Measured ? "measured by this application" : "recorded by another tool or unavailable")}."));
         if (blocking.Count > 0 && checks.All(c => c.Status != CompatibilityStatus.Blocked))
             checks.Add(new("Other eligibility rules", CompatibilityStatus.Blocked, string.Join(" ", blocking)));

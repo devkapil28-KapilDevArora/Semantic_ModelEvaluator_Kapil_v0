@@ -119,6 +119,7 @@ public sealed class PairSideViewModel : ObservableObject
         {
             if (!SetProperty(ref source, value)) return;
             Run = null; Runs.Clear(); Jobs.Clear(); loadedResult = null;
+            useThreshold = false; OnPropertyChanged(nameof(UseThreshold)); SetScores(null);
             foreach (var n in new[] { nameof(IsProviderSource), nameof(IsFolderSource), nameof(IsCloudSource), nameof(IsBundleSource), nameof(IsSavedSource), nameof(IsCapturedSource), nameof(SourceExplanation), nameof(IsPsapiLive) })
                 OnPropertyChanged(n);
             if (value == SideSource.EvalKitCachedBundle) _ = RefreshBundlesCommand.ExecuteAsync(null);
@@ -152,6 +153,7 @@ public sealed class PairSideViewModel : ObservableObject
         set
         {
             if (!SetProperty(ref model, value)) return;
+            useThreshold = false; OnPropertyChanged(nameof(UseThreshold)); SetScores(null);
             Validation = ""; OnPropertyChanged(nameof(ModelDetail));
             if (value is { Identity.ProviderId: PsapiProvider.ProviderId, LocalPath: { Length: > 0 } folder }) { UseCapturedBundle(folder, value.DisplayName); return; }
             OnPropertyChanged(nameof(IsPsapiLive));
@@ -286,7 +288,9 @@ public sealed class PairSideViewModel : ObservableObject
             if (provider != p) return;
             var listed = SemanticSearchOnly(p, found);
             foreach (var m in listed) Models.Add(m);
-            if (listed.Count < found.Count) Connection += $"\n{found.Count - listed.Count} non-semantic-search model(s) hidden (generation, classification or reranking).";
+            if (listed.Count < found.Count) Connection += p.Id == PsapiProvider.ProviderId
+                ? "\nCaptured runs are not executable models. To inspect them, choose the Cached EvalKit bundle source."
+                : $"\n{found.Count - listed.Count} non-semantic-search model(s) hidden (generation, classification or reranking).";
             if (found.Count == 0) Connection += p.Id switch
             {
                 FoundryProvider.ProviderId => "\nNo deployments configured. Add one in Settings → Provider settings → Microsoft AI Foundry.",
@@ -328,7 +332,8 @@ public sealed class PairSideViewModel : ObservableObject
     }
 
     private static List<ModelDescriptor> SemanticSearchOnly(IModelProvider p, IReadOnlyList<ModelDescriptor> found) =>
-        p.Id == HuggingFaceProvider.ProviderId ? [.. found.Where(HuggingFaceProvider.IsSemanticSearchModel)] : [.. found];
+        p.Id == HuggingFaceProvider.ProviderId ? [.. found.Where(HuggingFaceProvider.IsSemanticSearchModel)]
+        : p.Id == PsapiProvider.ProviderId ? [.. found.Where(m => string.IsNullOrEmpty(m.LocalPath))] : [.. found];
 
     private async Task PrepareAsync()
     {

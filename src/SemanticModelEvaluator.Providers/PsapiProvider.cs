@@ -130,7 +130,7 @@ public sealed class PsapiProvider : IModelProvider
     public const string SourceCommitInspected = "0527efc2519feabfdafbfeec6f1b4caccc97dd2d";
     public const string Scoring = "cosine similarity of L2-normalised embeddings mapped to (cos + 1) / 2, clamped to [0, 1]; higher is more similar";
     public const string InvocationNote =
-        "PSAPI models run as a whole-dataset EvalKit job (local CPU backend), not per item. Choose the source 'PSAPI model — run locally via EvalKit' for this side.";
+        "PSAPI models run as a whole-dataset EvalKit job (local CPU backend), not per item. Choose 'Model provider — invoke for a new evaluation', then the PSAPI provider and an installed model.";
 
     /// <summary>The four PSAPI models exposed by the authoritative backend (PsApiModels.cpp / README.md).</summary>
     public static IReadOnlyList<PsapiModelSpec> Catalog { get; } =

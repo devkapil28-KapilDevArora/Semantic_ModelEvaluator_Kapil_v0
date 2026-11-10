@@ -126,6 +126,9 @@
          <ContentControl Grid.Column="1" Content="{Binding B}" ContentTemplate="{StaticResource SideTemplate}" Focusable="False"/>
         </Grid>
         <TextBlock Text="{Binding PairValidation}" TextWrapping="Wrap" Margin="4,6" AutomationProperties.AutomationId="PairValidation" AutomationProperties.LiveSetting="Polite"/>
+        <Button Content="Use installed PSAPI models for a new evaluation..." Command="{Binding UseLivePsapiCommand}"
+                Visibility="{Binding CanUseLivePsapi, Converter={StaticResource BoolVisibility}}" HorizontalAlignment="Left"
+                AutomationProperties.AutomationId="PairUseLivePsapi"/>
        </StackPanel>
       </GroupBox>
       <GroupBox Header="Step 3 · Dataset and evaluation">

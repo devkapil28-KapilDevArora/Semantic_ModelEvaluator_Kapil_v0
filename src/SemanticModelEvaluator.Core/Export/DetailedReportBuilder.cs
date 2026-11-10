@@ -91,7 +91,8 @@ public static partial class DetailedReportBuilder
           .Append("<p class=\"muted\">Dataset ").Append(H(r.Dataset.Name)).Append(" v").Append(H(r.Dataset.Version)).Append(" · generated ")
           .Append(H(r.GeneratedAt.ToString("yyyy-MM-dd HH:mm:ss zzz", Inv))).Append("</p>");
         sb.Append("<p class=\"notice ").Append(sensitive ? "warn" : "info").Append("\" role=\"note\"><strong>Data handling:</strong> ")
-          .Append(H(string.IsNullOrWhiteSpace(r.DatasetClassification) ? "Unclassified" : r.DatasetClassification)).Append(". ")
+          .Append(H(sensitive ? $"Sensitive or unclassified data. Dataset: {U(r.DatasetClassification)}; source A: {U(r.A.Classification)}; source B: {U(r.B.Classification)}"
+              : string.IsNullOrWhiteSpace(r.DatasetClassification) ? "Unclassified" : r.DatasetClassification)).Append(". ")
           .Append(content ? (sensitive ? "Sample-level content is included after explicit confirmation — handle this file under the source's rules." : "Sample-level content is included.")
                           : sensitive ? "Sample-level content (query text, labels, images, item and document identifiers, per-item scores) is omitted; aggregate results only."
                           : "Sample-level content (query text, labels, images) is omitted; identifiers and scores only.")
@@ -109,6 +110,11 @@ public static partial class DetailedReportBuilder
         var parts = new StringBuilder[titles.Length + 1];
         void Section(int n, Action body)
         {
+            if (!r.IsComparable && n is >= 12 and <= 20)
+            {
+                parts[n] ??= new StringBuilder("<p class=\"notice warn\">Not evaluated: the selected runs are not comparable. Resolve the compatibility failures in section 11. Load matching runs and their exact dataset, or choose model providers for a new evaluation on the selected dataset. No failed-item rate or model-performance conclusion is available.</p>");
+                return;
+            }
             int start = sb.Length;
             body();
             (parts[n] ??= new StringBuilder()).Append(sb, start, sb.Length - start);
@@ -233,7 +239,7 @@ public static partial class DetailedReportBuilder
         Section(13, () =>
         {
             var q = r.Metrics.Where(m => m.Definition.Category == MetricCategory.Quality).ToList();
-            if (q.Count == 0) sb.Append("<p>No quality metric could be computed (judgments or labels are missing).</p>");
+            if (q.Count == 0) sb.Append("<p>No quality metric was requested or could be computed. Enable quality metrics and provide relevance judgments or task labels.</p>");
             else
             {
                 MetricTable(sb, q, "Quality metrics");
@@ -256,7 +262,11 @@ public static partial class DetailedReportBuilder
         Section(14, () =>
         {
             var h = r.Metrics.Where(m => m.Definition.Category == MetricCategory.Harm).ToList();
-            if (h.Count == 0) { sb.Append("<p>No harm metric is available: the dataset has no safety judgments. Unjudged results are never treated as safe.</p>"); }
+            if (h.Count == 0)
+            {
+                sb.Append("<p>Safety assessment is not available: no harm metric was requested or the dataset has no safety judgments. Enable harm metrics and use a dataset with reviewed safety labels. Retrieval relevance labels are not safety labels; unjudged results are never treated as safe.</p>");
+                return;
+            }
             else MetricTable(sb, h, "Harm metrics — lower is better; values are the actual measured rates (not inverted)");
             sb.Append("<p>Items where at least one model retained a result judged harmful: <strong>").Append(r.Rows.Count(x => x.Flags.HasFlag(QueryFlags.SafetyConcern))).Append("</strong>.</p>");
         });
@@ -365,6 +375,11 @@ public static partial class DetailedReportBuilder
         });
         Section(23, () =>
         {
+            if (!r.IsComparable)
+            {
+                sb.Append("<p>Metrics, item outcomes and performance comparisons were not computed because eligibility failed. This is not evidence that either model failed the selected dataset. Resolve section 11 before requesting an evaluation report.</p>");
+                return;
+            }
             var unknown = r.Metrics.Where(m => m.A?.Value is null || m.B?.Value is null)
                 .Select(m => $"{m.Definition.Name}: unknown for {(m.A?.Value is null && m.B?.Value is null ? "both models" : m.A?.Value is null ? "Model A" : "Model B")}").ToList();
             unknown.AddRange(r.Performance.Where(p => p.A is null || p.B is null)

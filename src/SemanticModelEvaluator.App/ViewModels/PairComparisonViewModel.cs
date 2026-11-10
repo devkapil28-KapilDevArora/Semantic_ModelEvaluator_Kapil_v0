@@ -79,6 +79,7 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         FetchDatasetCommand = Command(FetchDatasetAsync);
         DemoCommand = Command(LoadDemoAsync);
         RunCommand = Command(RunAsync);
+        UseLivePsapiCommand = Command(UseLivePsapiAsync);
         CancelCommand = new RelayCommand(() => operation?.Cancel());
         DownloadCommand = Command(DownloadAsync);
         OnSelectionChanged();
@@ -91,6 +92,9 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
     public IAsyncRelayCommand FetchDatasetCommand { get; }
     public IAsyncRelayCommand DemoCommand { get; }
     public IAsyncRelayCommand RunCommand { get; }
+    public IAsyncRelayCommand UseLivePsapiCommand { get; }
+    public bool CanUseLivePsapi => new[] { A, B }.Any(s => s.IsCapturedSource
+        && s.Configuration is { ProviderId: PsapiProvider.ProviderId } c && PsapiProvider.Find(c.ModelId) is not null);
     public IRelayCommand CancelCommand { get; }
     public IAsyncRelayCommand DownloadCommand { get; }
     public IReadOnlyList<SourceOption> SourceOptions => PairSideViewModel.SourceOptions;
@@ -113,7 +117,7 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         {
             if (!SetProperty(ref sampleLimit, Math.Max(0, value))) return;
             OnPropertyChanged(nameof(ModePlan));
-            if (result is not null) { basis = null; Result = null; ClearResults(); Status = "Sample limit changed; the previous comparison no longer matches the selected scope. Run or load the comparison again."; }
+            if (result is not null) { InvalidateComparison(); Status = "Sample limit changed; the previous comparison no longer matches the selected scope. Run or load the comparison again."; }
         }
     }
     public bool ReuseExisting { get => reuse; set { if (SetProperty(ref reuse, value)) OnPropertyChanged(nameof(ModePlan)); } }
@@ -213,11 +217,35 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
 
     private void OnSelectionChanged()
     {
+        InvalidateComparison();
         var v = PairSelection.Validate(A.Configuration, B.Configuration);
         PairValidation = string.Join("\n", v.Issues.Select(i => (i.Severity == ValidationSeverity.Error ? "✖ " : i.Severity == ValidationSeverity.Warning ? "⚠ " : "✔ ") + i.Message));
         UpdateDatasetMatch();
         OnPropertyChanged(nameof(HasCapturedDataset));
+        OnPropertyChanged(nameof(CanUseLivePsapi));
         OnPropertyChanged(nameof(ModePlan));
+    }
+
+    private void InvalidateComparison()
+    {
+        recalculation?.Cancel();
+        basis = null; Result = null; ClearResults();
+    }
+
+    private Task UseLivePsapiAsync()
+    {
+        var choices = new[] { A, B }.Where(s => s.IsCapturedSource && s.Configuration?.ProviderId == PsapiProvider.ProviderId)
+            .Select(s => (Side: s, Spec: PsapiProvider.Find(s.Configuration!.ModelId))).Where(x => x.Spec is not null).ToList();
+        if (choices.Count == 0) throw new InvalidOperationException("Select a captured Genoa, Florence, Palermo or Space v6 run first.");
+        var backend = PsapiBackendStatus.Probe(cli);
+        if (!backend.CanRun) throw new InvalidOperationException(backend.Summary);
+        var selections = choices.Select(x => (x.Side, Model: PsapiProvider.Describe(x.Spec!, backend))).ToList();
+        if (!dialogs.Confirm("Replace captured PSAPI results with installed local models?\n" +
+            string.Join("\n", selections.Select(x => $"{x.Side.Title}: {x.Side.Configuration!.Label} -> {x.Model.DisplayName} ({x.Model.Identity.Revision})")) +
+            "\nThe installed model/runtime may differ from the captured run. Thresholds will be reset. No inference starts now; use Run or load comparison to evaluate the dataset selected in Step 3.")) return Task.CompletedTask;
+        foreach (var x in selections) x.Side.SelectProviderModel(PsapiProvider.ProviderId, x.Model);
+        Status = "Live PSAPI models selected; previous thresholds and results cleared. Check Step 3, then Run or load comparison. Captured runs were not modified.";
+        return Task.CompletedTask;
     }
 
     // ---- dataset ---------------------------------------------------------------------------------------------
@@ -236,7 +264,7 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         if (ds.ValidationIssues.Any(i => i.Severity == ValidationSeverity.Error))
             throw new InvalidDataException(string.Join("\n", ds.ValidationIssues.Where(i => i.Severity == ValidationSeverity.Error).Select(i => i.Message)));
         ct.ThrowIfCancellationRequested();
-        dataset = ds; basis = null; Result = null; ClearResults();
+        dataset = ds; InvalidateComparison();
         var judged = ds.Task is EvalTask.Retrieval or EvalTask.ImageTextRetrieval or EvalTask.Reranking ? ds.JudgmentCoverage : ds.LabelCoverage;
         var withText = ds.Queries.Count(q => !string.IsNullOrWhiteSpace(q.Text)) + ds.Examples.Count(e => !string.IsNullOrWhiteSpace(e.Text));
         var cacheRoot = EvalKitFormat.DatasetCacheRoot(settings.Current.EvalKit.DatasetCacheDirectory);
@@ -297,7 +325,6 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
                 : "Select a prepared dataset above and click Load selected dataset. Browse to download or prepare another dataset.";
             return;
         }
-        var loaded = EvalKitDatasetIdentity.From(dataset.ToReference());
         var lines = new List<string>();
         foreach (var s in new[] { A, B })
         {
@@ -312,10 +339,9 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
             }
             if (s.IsProviderSource) { lines.Add($"✔ {s.Title}: a new evaluation will be scored against this exact dataset."); continue; }
             if (s.Run is null) { lines.Add($"• {s.Title}: no run selected."); continue; }
-            var mismatch = EvalKitDatasetIdentity.From(s.Run.RunDataset).Mismatches(loaded);
-            if (s.Run.RunDataset.Task != dataset.Task) mismatch = [.. mismatch, $"run task {s.Run.RunDataset.Task} differs from dataset task {dataset.Task}"];
+            var mismatch = PairComparer.DatasetMismatches(s.Run.RunDataset, dataset.ToReference());
             lines.Add(mismatch.Count == 0 ? $"✔ {s.Title}: run matches dataset name, version and payload hash."
-                : $"✖ {s.Title}: NOT comparable — {string.Join("; ", mismatch)}. Load the exact dataset version the run used.");
+                : $"✖ {s.Title}: NOT comparable — {string.Join("; ", mismatch)}. Load matching runs and their exact dataset, or select a model provider for a new evaluation on this dataset.");
         }
         DatasetMatch = string.Join("\n", lines);
     }
@@ -334,11 +360,37 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
 
     private async Task RunAsync()
     {
+        InvalidateComparison();
         var pair = PairSelection.Validate(A.Configuration, B.Configuration);
         if (!pair.IsValid) throw new InvalidOperationException(pair.ToString());
         var full = dataset ?? throw new InvalidOperationException("Load a dataset first (step 3).");
         var (ds, ids) = PairComparer.Sample(full, sampleLimit);
         var depth = Math.Max(100, k);
+        var captured = new Dictionary<PairSideViewModel, PairSide>();
+        foreach (var s in new[] { A, B }.Where(s => s.IsCapturedSource))
+        {
+            var choice = s.Run ?? throw new InvalidOperationException($"{s.Title}: select a captured run.");
+            var issues = PairComparer.DatasetMismatches(choice.RunDataset, full.ToReference());
+            if (issues.Count > 0) throw new InvalidOperationException($"{s.Title}: comparison blocked before evaluation. {string.Join(" ", issues)} " +
+                "Choose matching captured runs and their exact dataset, or use installed PSAPI models for a new evaluation on the Step 3 dataset.");
+        }
+        foreach (var s in new[] { A, B }.Where(s => s.IsCapturedSource))
+        {
+            var c = s.Run!;
+            var r = await Task.Run(() => s.LoadCaptured(depth, Token, full.Queries.Select(q => q.Id).ToList()), Token)
+                ?? throw new InvalidOperationException($"{s.Title}: the captured run has no results.");
+            var inScope = (PairComparer.IsRetrievalTask(ds.Task) ? ds.Queries.Select(q => q.Id) : ds.Examples.Select(e => e.Id)).ToHashSet(StringComparer.Ordinal);
+            if (!inScope.Overlaps(PairComparer.IsRetrievalTask(ds.Task) ? r.Queries.Select(q => q.QueryId) : r.Examples.Select(e => e.ExampleId)))
+                throw new InvalidOperationException($"{s.Title}: the captured run has no query/example IDs in the selected dataset and scope. No model was invoked.");
+            captured[s] = new PairSide { Configuration = c.Configuration, Result = r, RunDataset = c.RunDataset, Origin = c.Origin,
+                SourceDescription = c.SourceDescription, RunId = c.RunId, RunAt = c.RunAt, CachedDepth = c.CachedDepth,
+                Threshold = s.EffectiveThreshold, Classification = c.Classification };
+        }
+        if (captured.Count == 2)
+        {
+            var eligibility = PairComparer.CheckEligibility(ds, captured[A], captured[B], k);
+            if (eligibility.Blocking.Count > 0) throw new InvalidOperationException(string.Join(" ", eligibility.Blocking));
+        }
 
         var toRun = new List<PairSideViewModel>();
         foreach (var s in new[] { A, B })
@@ -362,7 +414,8 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         {
             var plans = toRun.Select(s => new ModelPlan(s.Model!)).ToList();
             var check = EvaluationEngine.CheckCompatibility(plans, ds, ds.Task);
-            if (!check.CanRun) throw new InvalidOperationException("Cannot evaluate: " + string.Join("; ", check.Items.Where(i => i.Severity == ValidationSeverity.Error).Select(i => $"{i.Model}: {i.Message}")));
+            if (!check.CanRun || check.Items.Any(i => i.Severity == ValidationSeverity.Error))
+                throw new InvalidOperationException("Cannot evaluate both models: " + string.Join("; ", check.Items.Where(i => i.Severity == ValidationSeverity.Error).Select(i => $"{i.Model}: {i.Message}")));
             var config = new EvaluationConfig { K = k, RetainDepth = depth, BatchSize = 16, MaxConcurrency = 2, TimeoutSeconds = 1800,
                 MetricIds = [], MetricVersions = [] };
             var progress = new Progress<EvaluationProgress>(p => Status = $"Invoking {p.ModelName} ({p.ModelIndex}/{p.ModelCount}): {p.Stage} {p.Completed}/{p.Total} · {p.FailedItems} failed · {p.Elapsed:mm\\:ss}");
@@ -384,11 +437,7 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
                 return new PairSide { Configuration = s.Configuration!, Result = e.Result, RunDataset = e.Dataset, Origin = ResultOrigin.NewEvaluation,
                     SourceDescription = psapiNotes.GetValueOrDefault(EvaluationKey(s.Configuration!, full)) ?? $"New evaluation by this app (run {e.RunId})", RunId = e.RunId, RunAt = e.At, CachedDepth = e.Depth, Threshold = s.EffectiveThreshold };
             }
-            var c = s.Run ?? throw new InvalidOperationException($"{s.Title}: select a captured run.");
-            var exact = EvalKitDatasetIdentity.From(c.RunDataset).Mismatches(EvalKitDatasetIdentity.From(full.ToReference())).Count == 0;
-            var r = s.LoadCaptured(depth, Token, exact ? full.Queries.Select(q => q.Id).ToList() : null) ?? throw new InvalidOperationException($"{s.Title}: the captured run has no results.");
-            return new PairSide { Configuration = c.Configuration, Result = r, RunDataset = c.RunDataset, Origin = c.Origin, SourceDescription = c.SourceDescription,
-                RunId = c.RunId, RunAt = c.RunAt, CachedDepth = c.CachedDepth, Threshold = s.EffectiveThreshold, Classification = c.Classification };
+            return captured[s];
         }
         var (a, b) = await Task.Run(() => (Side(A), Side(B)), Token);
         A.SetScores(a.Result); B.SetScores(b.Result);
@@ -397,7 +446,7 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         await CompareAsync(Token);
         var invoked = toRun.Concat(psapi).ToList();
         Status = (invoked.Count > 0 ? $"Invoked {string.Join(", ", invoked.Select(s => s.Title))}; " : "No model invoked; ") +
-            $"loaded/compared results. {result?.Recommendation.Headline}";
+            (result?.IsComparable == true ? $"loaded/compared results. {result.Recommendation.Headline}" : $"comparison blocked. {result?.Recommendation.Detail}");
     }
 
     /// <summary>
@@ -495,6 +544,7 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
         Headline = Summary = Blocking = Warnings = Strengths = Limitations = "";
         MetricRows = []; PerformanceRows = []; Counts = []; Heatmap = []; Rows = []; CurveMetrics = [];
         CurvesA = []; CurvesB = []; Radar = null; RadarNote = ""; CompatibilityRows = []; AgreementText = "";
+        SelectedRow = null; FilteredRows.Clear(); OnPropertyChanged(nameof(RowCountText));
         foreach (var n in new[] { nameof(Headline), nameof(Summary), nameof(Blocking), nameof(Warnings), nameof(Strengths), nameof(Limitations),
             nameof(MetricRows), nameof(PerformanceRows), nameof(Counts), nameof(Heatmap), nameof(Rows), nameof(CurveMetrics), nameof(CompatibilityRows), nameof(AgreementText) }) OnPropertyChanged(n);
     }
@@ -511,11 +561,11 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
             $"Run times: A {r.A.RunAt?.ToString("u") ?? "unknown"} · B {r.B.RunAt?.ToString("u") ?? "unknown"}\n" +
             $"Configuration: K={r.Settings.K} · A threshold {PairComparer.Fmt(r.A.Threshold, "0.0000")} · B threshold {PairComparer.Fmt(r.B.Threshold, "0.0000")}" +
             $" · items {(r.Settings.SampledIds is { } s ? $"sample of {s.Count}" : "all")}\n" +
-            $"Outcomes: A wins {r.AWins} · B wins {r.BWins} · ties {r.Ties} · unknown {r.Unknown}\n" +
+            (r.IsComparable ? $"Outcomes: A wins {r.AWins} · B wins {r.BWins} · ties {r.Ties} · unknown {r.Unknown}\n" : "Outcomes: not evaluated (eligibility failed).\n") +
             $"Confidence: {r.Recommendation.Confidence} — {r.Recommendation.ConfidenceReason}" +
             (r.Recommendation.SignTestP is { } p ? $" (sign test p={p:0.###})" : "") + "\n" + r.Recommendation.Detail +
             (r.IsLikeForLike ? "" : "\n⚠ This comparison is not fully like-for-like; see warnings.");
-        Blocking = r.Blocking.Count == 0 ? "" : "Blocking (metrics shown for diagnosis only):\n" + string.Join("\n", r.Blocking.Select(x => "✖ " + x));
+        Blocking = r.Blocking.Count == 0 ? "" : "Comparison blocked before scoring:\n" + string.Join("\n", r.Blocking.Select(x => "✖ " + x));
         Warnings = r.Warnings.Count == 0 ? "" : string.Join("\n", r.Warnings.Select(x => "⚠ " + x));
         Strengths = $"Model A strengths:\n{Bullets(r.StrengthsA)}\nModel A weaknesses:\n{Bullets(r.WeaknessesA)}\n\nModel B strengths:\n{Bullets(r.StrengthsB)}\nModel B weaknesses:\n{Bullets(r.WeaknessesB)}";
         Limitations = Bullets(r.Limitations);
@@ -525,7 +575,7 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
             CompatibilityStatus.Blocked => "✖ Blocked", _ => "? Unknown"
         }, c.Detail))];
         var ag = r.Agreement;
-        AgreementText = ag is null ? "Not applicable (agreement is computed for retrieval comparisons only)." :
+        AgreementText = !r.IsComparable ? "Not evaluated: resolve the eligibility failures." : ag is null ? "Not applicable (agreement is computed for retrieval comparisons only)." :
             $"Queries compared: {ag.Queries}\n" +
             $"Mean top-{r.Settings.K} overlap (Jaccard): {PairComparer.Fmt(ag.MeanTopKOverlap, "0.000")}\n" +
             $"Mean rank correlation (Spearman ρ): {PairComparer.Fmt(ag.MeanRankCorrelation, "0.000")} over {ag.RankCorrelationQueries} queries\n" +
@@ -546,7 +596,7 @@ public sealed class PairComparisonViewModel : ObservableObject, IDisposable
                 bars ? BarWidth * Math.Clamp(m.B!.Value!.Value, 0, 1) : 0, bars, note);
         })];
         PerformanceRows = [.. r.Performance.Select(p => new PairPerformanceView(p.Name, PairComparer.Fmt(p.A, p.Format), PairComparer.Fmt(p.B, p.Format), PairComparer.Signed(p.Delta, p.Format), p.Basis))];
-        Counts =
+        Counts = !r.IsComparable ? [] :
         [
             new("Total items", r.CountsA.Total.ToString(), r.CountsB.Total.ToString()),
             new("Judged", r.CountsA.Judged.ToString(), r.CountsB.Judged.ToString()),

@@ -7,6 +7,7 @@ using SemanticModelEvaluator.Core.Datasets;
 using SemanticModelEvaluator.Core.Evaluation;
 using SemanticModelEvaluator.Core.Metrics;
 using SemanticModelEvaluator.Core.Models;
+using SemanticModelEvaluator.Core.Pairing;
 using SemanticModelEvaluator.Core.Persistence;
 using SemanticModelEvaluator.Core.Providers;
 using SemanticModelEvaluator.Core.Security;
@@ -158,6 +159,73 @@ public class WorkbenchTests
         Assert.Equal(before, fixture.Pair.DatasetInfo);
     }
 
+    [Fact]
+    public async Task Changing_a_model_invalidates_results_and_does_not_reuse_its_threshold()
+    {
+        using var root = new TempAppRoot();
+        using var fixture = new DatasetPickerFixture();
+        await fixture.Pair.DemoCommand.ExecuteAsync(null);
+        fixture.Pair.A.UseThreshold = true;
+        await fixture.Pair.RunCommand.ExecuteAsync(null);
+        Assert.NotNull(fixture.Pair.Result);
+        Assert.NotEmpty(fixture.Pair.FilteredRows);
+        fixture.Pair.SelectedRow = fixture.Pair.FilteredRows[0];
+        fixture.Pair.A.SelectProviderModel(DeterministicProvider.ProviderId, DeterministicProvider.Describe("hash-char3-256"));
+        Assert.False(fixture.Pair.HasResult);
+        Assert.Empty(fixture.Pair.FilteredRows);
+        Assert.Empty(fixture.Pair.MetricRows);
+        Assert.Null(fixture.Pair.SelectedRow);
+        Assert.False(fixture.Pair.A.UseThreshold);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Incompatible_captured_run_is_rejected_before_other_model_execution(bool wrongIdentity)
+    {
+        using var root = new TempAppRoot();
+        using var fixture = new DatasetPickerFixture();
+        await fixture.Pair.LoadDatasetAsync(Fixtures.HelpdeskManifest);
+        fixture.Pair.A.SelectProviderModel(DeterministicProvider.ProviderId, DeterministicProvider.Describe("hash-word-256"));
+        var ds = DatasetLoader.LoadManifest(Fixtures.HelpdeskManifest);
+        var saved = Fixtures.RetrievalRunB();
+        saved.Queries = [new QueryResult { QueryId = "not-in-the-loaded-dataset" }];
+        fixture.Pair.B.Source = SideSource.SavedRun;
+        fixture.Pair.B.Run = new CapturedRunChoice
+        {
+            Label = "incompatible captured run", Configuration = ModelConfiguration.From(saved, "test"),
+            RunDataset = ds.ToReference() with { Version = wrongIdentity ? "different-version" : ds.Version },
+            Origin = ResultOrigin.LoadedWorkspace, SourceDescription = "test", Saved = saved
+        };
+        await fixture.Pair.RunCommand.ExecuteAsync(null);
+        Assert.Null(fixture.Pair.Result);
+        Assert.StartsWith("Error:", fixture.Pair.Status);
+        Assert.Contains(wrongIdentity ? "blocked before evaluation" : "no query/example IDs", fixture.Pair.Status);
+        Assert.Empty(Directory.Exists(AppPaths.Runs) ? Directory.GetFiles(AppPaths.Runs) : []);
+    }
+
+    [Fact]
+    public async Task New_evaluation_PSAPI_selector_does_not_list_captured_bundles()
+    {
+        using var root = new TempAppRoot();
+        using var fixture = new DatasetPickerFixture();
+        var folder = Path.Combine(root.Root, "bundle");
+        Directory.CreateDirectory(folder);
+        File.WriteAllText(Path.Combine(folder, "result-manifest.json"), "{\"model\":\"genoa\",\"psapi_version\":\"8\"}");
+        var provider = new PsapiProvider(() => [(folder, "captured Genoa")]);
+        var loaded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Pair.A.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(PairSideViewModel.Connection) && fixture.Pair.A.Connection.Contains("Captured runs are not executable"))
+                loaded.TrySetResult();
+        };
+        fixture.Pair.A.Provider = provider;
+        await loaded.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(4, fixture.Pair.A.Models.Count);
+        Assert.All(fixture.Pair.A.Models, m => Assert.True(string.IsNullOrEmpty(m.LocalPath)));
+        Assert.Equal(SideSource.NewEvaluation, fixture.Pair.A.Source);
+    }
+
     private sealed class DatasetPickerFixture : IDisposable
     {
         private readonly HttpClient http = new();
@@ -169,7 +237,7 @@ public class WorkbenchTests
         public DatasetPickerFixture()
         {
             var registry = new ProviderRegistry([new DeterministicProvider()]);
-            var engine = new EvaluationEngine(registry);
+            var engine = new EvaluationEngine(registry, store: new FileRunStore(AppPaths.Runs));
             var metrics = new MetricRegistry();
             var dialogs = new TestDialogs();
             var network = new NetworkPolicy { OfflineMode = true };
